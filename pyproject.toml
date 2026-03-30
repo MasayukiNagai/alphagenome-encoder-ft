@@ -3,7 +3,7 @@ name = "alphagenome-encoder-ft"
 version = "0.1.0"
 description = "Encoder-only AlphaGenome fine-tuning utilities for lentiMPRA."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "alphagenome-pytorch",
     "torch",
