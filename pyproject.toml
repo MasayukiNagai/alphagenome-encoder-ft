@@ -20,3 +20,9 @@ alphagenome-pytorch = { git = "https://github.com/genomicsxai/alphagenome-pytorc
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[dependency-groups]
+train = [
+    "tqdm>=4.67.3",
+    "wandb>=0.25.1",
+]
