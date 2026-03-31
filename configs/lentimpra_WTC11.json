@@ -22,7 +22,7 @@
   },
   "optim": {
     "optimizer": "adam",
-    "learning_rate": 0.001,
+    "learning_rate": 1e-03,
     "weight_decay": 1e-06,
     "lr_scheduler": "constant",
     "gradient_accumulation_steps": 1,
@@ -31,7 +31,7 @@
   "stage": {
     "num_epochs": 100,
     "early_stopping_patience": 5,
-    "val_eval_frequency": 4,
+    "val_evals_per_epoch": 4,
     "second_stage_lr": 1e-05,
     "second_stage_epochs": 50,
     "resume_from_stage2": false

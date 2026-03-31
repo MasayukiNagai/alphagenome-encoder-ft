@@ -35,8 +35,7 @@ wandb_name="mpra_${celltype}_${timestamp}"
 checkpoint_dir="./results/mpra_${celltype}_${timestamp}"
 mkdir -p "$checkpoint_dir"
 
-cmd="CUDA_VISIBLE_DEVICES=0 \
-  $PYTHON $script \
+cmd="$PYTHON $script \
   --config $config \
   --input_tsv $input_tsv \
   --pretrained_weights $pretrained_weights \

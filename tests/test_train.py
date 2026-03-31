@@ -3,12 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import torch
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, TensorDataset
 
-from alphagenome_encoder_ft.config import TrainConfig
+from alphagenome_encoder_ft.config import OptimConfig, TrainConfig
 from alphagenome_encoder_ft.heads import MPRAHead
 from alphagenome_encoder_ft.model import EncoderMPRAModel
-from alphagenome_encoder_ft.train import evaluate, load_checkpoint, run_training_stage, run_two_stage_training
+import alphagenome_encoder_ft.train as train_module
+from alphagenome_encoder_ft.train import create_scheduler, evaluate, load_checkpoint, run_training_stage, run_two_stage_training
 
 
 class DummyAlphaGenome(torch.nn.Module):
@@ -56,12 +58,16 @@ def _make_config(tmp_path: Path) -> TrainConfig:
                 "learning_rate": 1e-2,
                 "weight_decay": 0.0,
                 "lr_scheduler": "constant",
+                "plateau_factor": 0.5,
+                "plateau_patience": 2,
+                "plateau_mode": "min",
+                "plateau_min_lr": 0.0,
                 "gradient_accumulation_steps": 1,
             },
             "stage": {
                 "num_epochs": 2,
                 "early_stopping_patience": 5,
-                "val_eval_frequency": 1,
+                "val_evals_per_epoch": 1,
                 "second_stage_lr": 1e-3,
                 "second_stage_epochs": 1,
             },
@@ -167,13 +173,13 @@ def test_resume_from_stage2_loads_stage1_checkpoint(tmp_path: Path):
     assert result["stage2"]["best_checkpoint_path"] is not None
 
 
-def test_run_training_stage_respects_eval_frequency_and_emits_callbacks(tmp_path: Path):
+def test_run_training_stage_runs_validation_within_each_epoch_and_emits_callbacks(tmp_path: Path):
     model = _make_model()
     train_loader = _make_loader()
     val_loader = _make_loader()
     config = _make_config(tmp_path)
     config.stage.num_epochs = 3
-    config.stage.val_eval_frequency = 2
+    config.stage.val_evals_per_epoch = 2
     optimizer = torch.optim.Adam(model.head.parameters(), lr=1e-2)
     epoch_events = []
 
@@ -192,12 +198,99 @@ def test_run_training_stage_respects_eval_frequency_and_emits_callbacks(tmp_path
     )
 
     assert len(result["history"]["train_loss"]) == 3
-    assert result["history"]["val_epoch"] == [2.0, 3.0]
+    assert result["history"]["val_epoch"] == [1 / 3, 2 / 3, 4 / 3, 5 / 3, 7 / 3, 8 / 3]
     assert result["history"]["test_epoch"] == []
     assert [event["epoch"] for event in epoch_events] == [1.0, 2.0, 3.0]
-    assert "val_loss" not in epoch_events[0]
+    assert epoch_events[0]["val_loss"] >= 0.0
     assert "test_loss" not in epoch_events[-1]
     assert epoch_events[1]["val_loss"] >= 0.0
+
+
+def test_run_training_stage_validates_once_per_epoch_when_requested(tmp_path: Path):
+    model = _make_model()
+    train_loader = _make_loader()
+    val_loader = _make_loader()
+    config = _make_config(tmp_path)
+    config.stage.num_epochs = 2
+    config.stage.val_evals_per_epoch = 1
+    optimizer = torch.optim.Adam(model.head.parameters(), lr=1e-2)
+
+    result = run_training_stage(
+        model,
+        train_loader,
+        optimizer=optimizer,
+        config=config,
+        device="cpu",
+        num_epochs=2,
+        stage="stage1",
+        train_encoder=False,
+        val_loader=val_loader,
+        checkpoint_dir=tmp_path / "stage1",
+    )
+
+    assert result["history"]["val_epoch"] == [1.0, 2.0]
+
+
+def test_run_training_stage_deduplicates_dense_validation_points(tmp_path: Path):
+    model = _make_model()
+    train_loader = _make_loader()
+    val_loader = _make_loader()
+    config = _make_config(tmp_path)
+    config.stage.num_epochs = 1
+    config.stage.val_evals_per_epoch = 5
+    optimizer = torch.optim.Adam(model.head.parameters(), lr=1e-2)
+
+    result = run_training_stage(
+        model,
+        train_loader,
+        optimizer=optimizer,
+        config=config,
+        device="cpu",
+        num_epochs=1,
+        stage="stage1",
+        train_encoder=False,
+        val_loader=val_loader,
+        checkpoint_dir=tmp_path / "stage1",
+    )
+
+    assert result["history"]["val_epoch"] == [1 / 3, 2 / 3, 1.0]
+
+
+def test_run_training_stage_early_stopping_counts_validation_events(tmp_path: Path):
+    model = _make_model()
+    train_loader = _make_loader()
+    val_loader = _make_loader()
+    config = _make_config(tmp_path)
+    config.stage.num_epochs = 10
+    config.stage.early_stopping_patience = 2
+    config.stage.val_evals_per_epoch = 3
+    optimizer = torch.optim.Adam(model.head.parameters(), lr=1e-2)
+
+    original_evaluate = train_module.evaluate
+    eval_losses = iter([1.0] + [2.0] * 20)
+
+    def fake_evaluate(*args, **kwargs):
+        return {"loss": next(eval_losses), "pearson": 0.0}
+
+    train_module.evaluate = fake_evaluate
+    try:
+        result = run_training_stage(
+            model,
+            train_loader,
+            optimizer=optimizer,
+            config=config,
+            device="cpu",
+            num_epochs=10,
+            stage="stage1",
+            train_encoder=False,
+            val_loader=val_loader,
+            checkpoint_dir=tmp_path / "stage1",
+        )
+    finally:
+        train_module.evaluate = original_evaluate
+
+    assert len(result["history"]["val_epoch"]) == 7
+    assert result["best_epoch"] == 1 / 3
 
 
 def test_load_checkpoint_then_evaluate_best_checkpoint(tmp_path: Path):
@@ -224,3 +317,37 @@ def test_load_checkpoint_then_evaluate_best_checkpoint(tmp_path: Path):
 
     assert metrics["loss"] >= 0.0
     assert "pearson" in metrics
+
+
+def test_create_scheduler_uses_plateau_config():
+    optimizer = torch.optim.Adam([torch.nn.Parameter(torch.tensor(1.0))], lr=1e-2)
+    optim_config = OptimConfig(
+        lr_scheduler="plateau",
+        plateau_factor=0.25,
+        plateau_patience=4,
+        plateau_mode="min",
+        plateau_min_lr=1e-5,
+    )
+
+    scheduler = create_scheduler(optim_config, optimizer, total_epochs=5)
+
+    assert isinstance(scheduler, ReduceLROnPlateau)
+    assert scheduler.factor == 0.25
+    assert scheduler.patience == 4
+    assert scheduler.mode == "min"
+    assert scheduler.min_lrs == [1e-5]
+
+
+def test_train_config_rejects_invalid_plateau_settings():
+    try:
+        TrainConfig.from_dict(
+            {
+                "data": {"input_tsv": "/tmp/mock.tsv"},
+                "checkpoint": {"pretrained_weights": "/tmp/weights.pt"},
+                "optim": {"plateau_factor": 1.0},
+            }
+        )
+    except ValueError as exc:
+        assert "optim.plateau_factor" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for invalid plateau_factor")

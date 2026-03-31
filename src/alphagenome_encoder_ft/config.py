@@ -103,6 +103,10 @@ class OptimConfig:
     learning_rate: float = 1e-3
     weight_decay: float = 0.0
     lr_scheduler: str = "constant"
+    plateau_factor: float = 0.5
+    plateau_patience: int = 2
+    plateau_mode: str = "min"
+    plateau_min_lr: float = 0.0
     gradient_accumulation_steps: int = 1
     gradient_clip: float | None = None
 
@@ -115,6 +119,14 @@ class OptimConfig:
             raise ValueError("optim.weight_decay must be >= 0")
         if self.lr_scheduler not in {"constant", "cosine", "plateau"}:
             raise ValueError("optim.lr_scheduler must be one of constant, cosine, plateau")
+        if not 0 < self.plateau_factor < 1:
+            raise ValueError("optim.plateau_factor must be in (0, 1)")
+        if self.plateau_patience < 0:
+            raise ValueError("optim.plateau_patience must be >= 0")
+        if self.plateau_mode != "min":
+            raise ValueError("optim.plateau_mode must be 'min'")
+        if self.plateau_min_lr < 0:
+            raise ValueError("optim.plateau_min_lr must be >= 0")
         if self.gradient_accumulation_steps <= 0:
             raise ValueError("optim.gradient_accumulation_steps must be > 0")
         if self.gradient_clip is not None and self.gradient_clip <= 0:
@@ -125,7 +137,7 @@ class OptimConfig:
 class StageConfig:
     num_epochs: int = 10
     early_stopping_patience: int = 5
-    val_eval_frequency: int = 1
+    val_evals_per_epoch: int = 1
     second_stage_lr: float | None = None
     second_stage_epochs: int = 10
     resume_from_stage2: bool = False
@@ -135,8 +147,8 @@ class StageConfig:
             raise ValueError("stage.num_epochs must be > 0")
         if self.early_stopping_patience < 0:
             raise ValueError("stage.early_stopping_patience must be >= 0")
-        if self.val_eval_frequency <= 0:
-            raise ValueError("stage.val_eval_frequency must be > 0")
+        if self.val_evals_per_epoch <= 0:
+            raise ValueError("stage.val_evals_per_epoch must be > 0")
         if self.second_stage_lr is not None and self.second_stage_lr <= 0:
             raise ValueError("stage.second_stage_lr must be > 0 when set")
         if self.second_stage_epochs <= 0:

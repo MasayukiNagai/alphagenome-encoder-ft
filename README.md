@@ -1,8 +1,8 @@
 # AlphaGenome Encoder Fine-tuning
 
-`alphagenome-encoder-ft` is a PyTorch implementation of the encoder-only MPRA fine-tuning workflow from [`alphagenome_FT_MPRA`](https://github.com/Al-Murphy/alphagenome_FT_MPRA).
+`alphagenome-encoder-ft` is a PyTorch implementation of the encoder-only fine-tuning workflow from [`alphagenome_FT_MPRA`](https://github.com/Al-Murphy/alphagenome_FT_MPRA).
 
-This repository is built on top of [`alphagenome-pytorch`](https://github.com/genomicsxai/alphagenome-pytorch/tree/main) and focuses on a smaller scope than the original JAX-based project. In particular, it currently targets lentiMPRA-style scalar regression with AlphaGenome encoder faeatures, reusable encoder-only training utilities, and an MPRA oracle API for inference. It does **not** aim to cover all of the features in `alphagenome_FT_MPRA`.
+This repository is built on top of [`alphagenome-pytorch`](https://github.com/genomicsxai/alphagenome-pytorch/tree/main) and focuses on a smaller scope than the original JAX-based project. In particular, it currently targets lentiMPRA-style scalar regression with AlphaGenome encoder faeatures, reusable encoder-only training utilities, and an MPRA oracle API for inference.
 
 ## Scope
 
@@ -42,6 +42,8 @@ PYTHONPATH=src python scripts/train_mpra.py   --config configs/lentimpra_HepG2.n
 ```
 
 For direct Python usage, import from `alphagenome_encoder_ft` after setting `PYTHONPATH=src` or installing the package in editable mode.
+
+Validation scheduling uses `stage.val_evals_per_epoch` / `--val_evals_per_epoch` to mean the number of validation evaluations to run within each epoch. `1` means evaluate once at the end of each epoch.
 
 ## Load oracle
 ```bash

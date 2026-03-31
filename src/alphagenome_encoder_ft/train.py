@@ -81,16 +81,23 @@ def create_optimizer(
 
 
 def create_scheduler(
-    lr_scheduler: str,
+    optim_config: OptimConfig,
     optimizer: torch.optim.Optimizer,
     total_epochs: int,
 ):
+    lr_scheduler = optim_config.lr_scheduler
     if lr_scheduler == "constant":
         return None
     if lr_scheduler == "cosine":
         return CosineAnnealingLR(optimizer, T_max=max(1, total_epochs))
     if lr_scheduler == "plateau":
-        return ReduceLROnPlateau(optimizer, mode="min", patience=2)
+        return ReduceLROnPlateau(
+            optimizer,
+            mode=optim_config.plateau_mode,
+            factor=optim_config.plateau_factor,
+            patience=optim_config.plateau_patience,
+            min_lr=optim_config.plateau_min_lr,
+        )
     raise ValueError(f"Unknown lr_scheduler: {lr_scheduler}")
 
 
@@ -120,6 +127,7 @@ def train_epoch(
     train_encoder: bool = False,
     grad_clip: float | None = None,
     show_progress: bool = False,
+    batch_end_callback: Callable[[int, int], bool] | None = None,
 ) -> dict[str, float]:
     """Train for one epoch."""
 
@@ -187,6 +195,9 @@ def train_epoch(
 
         if tqdm is not None and show_progress:
             batch_iterator.set_postfix(loss=total_loss / max(1, total_samples))
+
+        if batch_end_callback is not None and not batch_end_callback(batch_idx, len(train_loader)):
+            break
 
     preds_cat, targets_cat = _gather_predictions(all_preds, all_targets)
     metrics = _compute_metrics(preds_cat, targets_cat, metric_fns)
@@ -352,18 +363,69 @@ def run_training_stage(
 
     history = _history_template()
     best_monitor = math.inf
-    best_epoch = start_epoch
+    best_epoch: float = float(start_epoch)
     best_checkpoint_path: Path | None = None
     evals_without_improvement = 0
 
     for epoch_idx in range(num_epochs):
         epoch_number = start_epoch + epoch_idx + 1
-        is_last_epoch = epoch_idx == num_epochs - 1
-        should_run_val = val_loader is not None and (
-            config.stage.val_eval_frequency <= 1
-            or epoch_number % config.stage.val_eval_frequency == 0
-            or is_last_epoch
-        )
+        num_train_batches = len(train_loader)
+        if val_loader is not None and config.stage.val_evals_per_epoch > 1:
+            val_eval_interval = max(1, num_train_batches // config.stage.val_evals_per_epoch)
+            val_eval_points = [i * val_eval_interval for i in range(1, config.stage.val_evals_per_epoch + 1)]
+            val_eval_points = [min(point, num_train_batches) for point in val_eval_points]
+            val_eval_points = sorted(set(val_eval_points))
+        else:
+            val_eval_points = [num_train_batches]
+
+        latest_eval_metrics: dict[str, float] = {"loss": math.inf}
+        val_metrics: dict[str, float] | None = None
+        should_stop = False
+
+        def _validate_if_needed(batch_idx: int, total_batches: int) -> bool:
+            nonlocal best_checkpoint_path, best_epoch, best_monitor
+            nonlocal evals_without_improvement, latest_eval_metrics, should_stop, val_metrics
+
+            if val_loader is None or batch_idx not in val_eval_points:
+                return True
+
+            val_metrics = evaluate(
+                model,
+                val_loader,
+                device,
+                loss_fn=loss_fn,
+                metric_fns=metric_fns,
+                use_amp=config.runtime.use_amp,
+            )
+            current_epoch = start_epoch + epoch_idx + (batch_idx / total_batches)
+            history["val_loss"].append(val_metrics["loss"])
+            history["val_pearson"].append(val_metrics.get("pearson", float("nan")))
+            history["val_epoch"].append(float(current_epoch))
+            latest_eval_metrics = val_metrics
+
+            if val_metrics["loss"] < best_monitor:
+                best_monitor = val_metrics["loss"]
+                best_epoch = float(current_epoch)
+                evals_without_improvement = 0
+                if stage_dir is not None:
+                    best_checkpoint_path = save_checkpoint(
+                        stage_dir / "best.pt",
+                        model,
+                        config=config,
+                        save_mode=config.checkpoint.save_mode,
+                        stage=stage,
+                        epoch=current_epoch,
+                        metrics=val_metrics,
+                    )
+            else:
+                evals_without_improvement += 1
+
+            patience_in_evals = config.stage.early_stopping_patience * config.stage.val_evals_per_epoch
+            if evals_without_improvement >= patience_in_evals:
+                should_stop = True
+                return False
+            return True
+
         train_metrics = train_epoch(
             model,
             train_loader,
@@ -376,38 +438,17 @@ def run_training_stage(
             train_encoder=train_encoder,
             grad_clip=config.optim.gradient_clip,
             show_progress=show_progress,
+            batch_end_callback=_validate_if_needed if val_loader is not None else None,
         )
         history["train_loss"].append(train_metrics["loss"])
         history["train_pearson"].append(train_metrics.get("pearson", float("nan")))
         history["train_epoch"].append(float(epoch_number))
 
-        current_monitor = train_metrics["loss"]
-        latest_eval_metrics = {"loss": current_monitor}
-        val_metrics = None
-        should_update_monitor = val_loader is None
-
-        if should_run_val:
-            val_metrics = evaluate(
-                model,
-                val_loader,
-                device,
-                loss_fn=loss_fn,
-                metric_fns=metric_fns,
-                use_amp=config.runtime.use_amp,
-            )
-            history["val_loss"].append(val_metrics["loss"])
-            history["val_pearson"].append(val_metrics.get("pearson", float("nan")))
-            history["val_epoch"].append(float(epoch_number))
-            current_monitor = val_metrics["loss"]
-            latest_eval_metrics = val_metrics
-            should_update_monitor = True
-
-        scheduler_step(scheduler, latest_eval_metrics)
-
-        if should_update_monitor:
-            if current_monitor < best_monitor:
-                best_monitor = current_monitor
-                best_epoch = epoch_number
+        if val_loader is None:
+            latest_eval_metrics = {"loss": train_metrics["loss"]}
+            if train_metrics["loss"] < best_monitor:
+                best_monitor = train_metrics["loss"]
+                best_epoch = float(epoch_number)
                 evals_without_improvement = 0
                 if stage_dir is not None:
                     best_checkpoint_path = save_checkpoint(
@@ -421,6 +462,8 @@ def run_training_stage(
                     )
             else:
                 evals_without_improvement += 1
+
+        scheduler_step(scheduler, latest_eval_metrics)
 
         metrics_parts = [
             f"[{stage}] epoch {epoch_number}",
@@ -444,7 +487,7 @@ def run_training_stage(
                 payload["val_pearson"] = val_metrics.get("pearson", float("nan"))
             epoch_callback(payload)
 
-        if should_run_val and evals_without_improvement >= config.stage.early_stopping_patience:
+        if should_stop:
             break
 
     return {

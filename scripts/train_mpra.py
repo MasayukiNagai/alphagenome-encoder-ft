@@ -60,12 +60,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--learning_rate", type=float, default=None)
     parser.add_argument("--weight_decay", type=float, default=None)
     parser.add_argument("--lr_scheduler", type=str, default=None, choices=["constant", "cosine", "plateau"])
+    parser.add_argument("--plateau_factor", type=float, default=None)
+    parser.add_argument("--plateau_patience", type=int, default=None)
+    parser.add_argument("--plateau_mode", type=str, default=None, choices=["min"])
+    parser.add_argument("--plateau_min_lr", type=float, default=None)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=None)
     parser.add_argument("--gradient_clip", type=float, default=None)
 
     parser.add_argument("--num_epochs", type=int, default=None)
     parser.add_argument("--early_stopping_patience", type=int, default=None)
-    parser.add_argument("--val_eval_frequency", type=int, default=None)
+    parser.add_argument("--val_evals_per_epoch", type=int, default=None)
     parser.add_argument("--second_stage_lr", type=float, default=None)
     parser.add_argument("--second_stage_epochs", type=int, default=None)
     parser.add_argument("--resume_from_stage2", action=argparse.BooleanOptionalAction, default=None)
@@ -122,13 +126,17 @@ def _build_overrides(args: argparse.Namespace) -> dict[str, Any]:
         "learning_rate": args.learning_rate,
         "weight_decay": args.weight_decay,
         "lr_scheduler": args.lr_scheduler,
+        "plateau_factor": args.plateau_factor,
+        "plateau_patience": args.plateau_patience,
+        "plateau_mode": args.plateau_mode,
+        "plateau_min_lr": args.plateau_min_lr,
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "gradient_clip": args.gradient_clip,
     }
     stage_pairs = {
         "num_epochs": args.num_epochs,
         "early_stopping_patience": args.early_stopping_patience,
-        "val_eval_frequency": args.val_eval_frequency,
+        "val_evals_per_epoch": args.val_evals_per_epoch,
         "second_stage_lr": args.second_stage_lr,
         "second_stage_epochs": args.second_stage_epochs,
         "resume_from_stage2": args.resume_from_stage2,
@@ -196,7 +204,7 @@ def main() -> dict[str, Any]:
 
     torch.manual_seed(config.runtime.seed)
     device = torch.device(config.runtime.device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    print(f"Using device: {device}")
+    print(f"Using device: {device}", flush=True)
     run_dir = Path(config.checkpoint.checkpoint_dir).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
     with open(run_dir / "config.json", "w") as handle:
@@ -248,7 +256,7 @@ def main() -> dict[str, Any]:
     print(f"  Test batches  : {len(test_loader):,}")
 
     stage1_optimizer = create_optimizer(config.optim, model.trainable_parameters(include_encoder=False))
-    stage1_scheduler = create_scheduler(config.optim.lr_scheduler, stage1_optimizer, config.stage.num_epochs)
+    stage1_scheduler = create_scheduler(config.optim, stage1_optimizer, config.stage.num_epochs)
     stage1_scheduler_step = scheduler_stepper(config.optim.lr_scheduler)
 
     wandb_epoch_logger = None
@@ -284,7 +292,7 @@ def main() -> dict[str, Any]:
             )
 
         def stage2_scheduler_factory(optimizer):
-            return create_scheduler(config.optim.lr_scheduler, optimizer, config.stage.second_stage_epochs)
+            return create_scheduler(config.optim, optimizer, config.stage.second_stage_epochs)
 
         results = run_two_stage_training(
             model,
@@ -319,35 +327,43 @@ def main() -> dict[str, Any]:
             show_progress=args.show_progress,
         )
 
-    best_checkpoint_path = results.get("best_checkpoint_path")
-    test_stage = "stage1"
-    test_epoch = results.get("best_epoch")
-    if best_checkpoint_path is None and "stage2" in results:
-        best_checkpoint_path = results["stage2"].get("best_checkpoint_path")
-        test_stage = "stage2"
-        test_epoch = results["stage2"].get("best_epoch")
+    test_targets: list[tuple[str, dict[str, Any]]] = [("stage1", results)]
+    if "stage2" in results:
+        test_targets = [("stage1", results["stage1"]), ("stage2", results["stage2"])]
 
-    load_checkpoint(best_checkpoint_path, model, map_location=device)
-    test_metrics = evaluate(model, test_loader, device, use_amp=config.runtime.use_amp)
-    results["test_metrics"] = test_metrics
-    results["history"]["test_loss"].append(test_metrics["loss"])
-    results["history"]["test_pearson"].append(test_metrics.get("pearson", float("nan")))
-    results["history"]["test_epoch"].append(float(test_epoch))
-    print(
-        f"[{test_stage}] final test | epoch {test_epoch} | "
-        f"test_loss={test_metrics['loss']:.4f} | "
-        f"test_pearson={test_metrics.get('pearson', float('nan')):.4f}"
-    )
-    if wandb_epoch_logger is not None:
-        wandb_epoch_logger(
-            {
-                "stage": test_stage,
-                "epoch": float(test_epoch),
-                "test_loss": test_metrics["loss"],
-                "test_pearson": test_metrics.get("pearson", float("nan")),
-                "event": "final_test",
-            }
+    final_stage = test_targets[-1][0]
+    final_metrics: dict[str, float] | None = None
+    final_epoch = 0.0
+    for stage_name, stage_result in test_targets:
+        checkpoint_path = stage_result.get("best_checkpoint_path")
+        test_epoch = float(stage_result.get("best_epoch", 0))
+        load_checkpoint(checkpoint_path, model, map_location=device)
+        test_metrics = evaluate(model, test_loader, device, use_amp=config.runtime.use_amp)
+        results[f"{stage_name}_test_metrics"] = test_metrics
+        print(
+            f"[{stage_name}] final test | epoch {test_epoch:g} | "
+            f"test_loss={test_metrics['loss']:.4f} | "
+            f"test_pearson={test_metrics.get('pearson', float('nan')):.4f}"
         )
+        if wandb_epoch_logger is not None:
+            wandb_epoch_logger(
+                {
+                    "stage": stage_name,
+                    "epoch": test_epoch,
+                    "test_loss": test_metrics["loss"],
+                    "test_pearson": test_metrics.get("pearson", float("nan")),
+                    "event": "final_test",
+                }
+            )
+        if stage_name == final_stage:
+            final_metrics = test_metrics
+            final_epoch = test_epoch
+
+    assert final_metrics is not None
+    results["test_metrics"] = final_metrics
+    results["history"]["test_loss"].append(final_metrics["loss"])
+    results["history"]["test_pearson"].append(final_metrics.get("pearson", float("nan")))
+    results["history"]["test_epoch"].append(final_epoch)
 
     with open(run_dir / "history.json", "w") as handle:
         json.dump(results["history"], handle, indent=2)
