@@ -11,22 +11,36 @@ Note: The current codebase does not yet include the full feature surface of `alp
 `alphagenome-encoder-ft` requires Python 3.12+ and depends on
 [`alphagenome-pytorch`](https://github.com/genomicsxai/alphagenome-pytorch).
 
-Recommended with `uv`:
+Install directly from GitHub:
 
 ```bash
+pip install "alphagenome-encoder-ft @ git+https://github.com/MasayukiNagai/alphagenome_encoder_ft.git"
+```
+
+For training, evaluation, and tests, also install:
+
+```bash
+pip install tqdm wandb matplotlib pytest
+```
+
+For local development with `uv`:
+
+```bash
+git clone https://github.com/MasayukiNagai/alphagenome_encoder_ft.git
 cd alphagenome-encoder-ft
 uv sync
 
-# Or to include libraries for training
+# To include libraries for training
 uv sync --group train
 ```
 
-With `pip`:
+For local development with `pip`:
 
 ```bash
+git clone https://github.com/MasayukiNagai/alphagenome_encoder_ft.git
 cd alphagenome-encoder-ft
 pip install -e .
-# For training, evaluation, test
+# For training, evaluation, tests
 pip install tqdm wandb matplotlib pytest
 ```
 
@@ -41,8 +55,7 @@ alphagenome-encoder-ft/
 │   ├── data.py       # lentiMPRA dataset and dataloader helpers
 │   ├── heads.py      # MPRAHead
 │   ├── model.py      # EncoderMPRAModel wrapper (AG Encoder + MPRAHead)
-│   ├── train.py      # reusable encoder-only training utilities
-│   └── ...
+│   └── train.py      # reusable encoder-only training utilities
 ├── configs/
 │   ├── lentimpra_HepG2.json
 │   ├── lentimpra_K562.json
@@ -112,7 +125,7 @@ left_adapter + insert + right_adapter + promoter + barcode
 
 During training or inference, you might want to control which of those fixed pieces are included around the insert sequence. `ConstructSpec` provides that assembly logic in one place.
 
-If your data always arrives in the same final reporter shape, `ConstructSpec` is not necessary. It is an optional convenience for flexible assembly, mainly included for downstream applications that need to switch construct layouts.
+If your data always arrives in the same final reporter shape, `ConstructSpec` is not necessary. It is an optional convenience for flexible assembly, mainly included for downstream applications that need to switch construct layouts (e.g., designing the insert, using different models which take different portions)
 
 ### `ConstructSpec`
 
@@ -157,5 +170,6 @@ construct_spec = ConstructSpec.lentimpra_default()
 reporter = construct_spec.assemble_sequence("MYSEQUENCE", mode="promoter_barcode")
 # reporter: MYSEQUENCE + PROMOTER + BARCODE
 ```
+For a list of sequences, use `assemble_sequences(...)`.
 
 For one-hot inputs, use `assemble_onehot(...)` with the same modes.
