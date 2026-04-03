@@ -61,19 +61,25 @@ def _make_config(tmp_path: Path, *, save_mode: str = "minimal") -> TrainConfig:
 def test_construct_spec_assembles_sequences_for_all_modes():
     spec = ConstructSpec(left_adapter="A", right_adapter="C", promoter_seq="G", barcode_seq="T")
 
-    assert spec.assemble_sequence("ac", mode="core") == "AACCGT"
-    assert spec.assemble_sequence("ac", mode="flanked") == "ACGT"
-    assert spec.assemble_sequence("ac", mode="full") == "AC"
+    assert spec.assemble_sequence("ac", mode="all") == "AACCGT"
+    assert spec.assemble_sequence("ac", mode="adapters") == "AACC"
+    assert spec.assemble_sequence("ac", mode="promoter") == "ACG"
+    assert spec.assemble_sequence("ac", mode="promoter_barcode") == "ACGT"
+    assert spec.assemble_sequence("ac", mode="none") == "AC"
 
 
 def test_construct_spec_rejects_missing_required_parts():
     spec = ConstructSpec(left_adapter=None, right_adapter=None, promoter_seq=None, barcode_seq=None)
 
     with pytest.raises(ValueError, match="requires construct components"):
-        spec.assemble_sequence("ac", mode="core")
+        spec.assemble_sequence("ac", mode="all")
     with pytest.raises(ValueError, match="requires construct components"):
-        spec.assemble_sequence("ac", mode="flanked")
-    assert spec.assemble_sequence("ac", mode="full") == "AC"
+        spec.assemble_sequence("ac", mode="adapters")
+    with pytest.raises(ValueError, match="requires construct components"):
+        spec.assemble_sequence("ac", mode="promoter")
+    with pytest.raises(ValueError, match="requires construct components"):
+        spec.assemble_sequence("ac", mode="promoter_barcode")
+    assert spec.assemble_sequence("ac", mode="none") == "AC"
 
 
 def test_construct_spec_assembles_onehot_for_rank_2_and_rank_3():
@@ -81,8 +87,8 @@ def test_construct_spec_assembles_onehot_for_rank_2_and_rank_3():
     single = torch.tensor([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]])
     batch = torch.stack([single, single], dim=0)
 
-    assembled_single = spec.assemble_onehot(single, mode="core")
-    assembled_batch = spec.assemble_onehot(batch, mode="flanked")
+    assembled_single = spec.assemble_onehot(single, mode="all")
+    assembled_batch = spec.assemble_onehot(batch, mode="adapters")
 
     assert assembled_single.shape == (6, 4)
     assert assembled_batch.shape == (2, 4, 4)
@@ -102,13 +108,17 @@ def test_construct_spec_rejects_invalid_shapes_and_modes():
 
 
 def test_construct_spec_rejects_missing_required_parts_for_onehot():
-    spec = ConstructSpec(left_adapter="A", right_adapter="C", promoter_seq=None, barcode_seq="T")
+    spec = ConstructSpec(left_adapter=None, right_adapter="C", promoter_seq=None, barcode_seq="T")
     onehot = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
 
+    with pytest.raises(ValueError, match="left_adapter"):
+        spec.assemble_onehot(onehot, mode="adapters")
     with pytest.raises(ValueError, match="promoter_seq"):
-        spec.assemble_onehot(onehot, mode="core")
+        spec.assemble_onehot(onehot, mode="all")
     with pytest.raises(ValueError, match="promoter_seq"):
-        spec.assemble_onehot(onehot, mode="flanked")
+        spec.assemble_onehot(onehot, mode="promoter")
+    with pytest.raises(ValueError, match="promoter_seq"):
+        spec.assemble_onehot(onehot, mode="promoter_barcode")
 
 
 def test_from_checkpoint_roundtrip_minimal_without_pretrained_weights(tmp_path: Path):
@@ -123,7 +133,7 @@ def test_from_checkpoint_roundtrip_minimal_without_pretrained_weights(tmp_path: 
     model.eval()
 
     insert = torch.tensor([[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]], dtype=torch.float32)
-    construct = construct_spec.assemble_onehot(insert, mode="full")
+    construct = construct_spec.assemble_onehot(insert, mode="none")
     direct_preds = model(construct, torch.zeros(1, dtype=torch.long))
 
     checkpoint_path = save_checkpoint(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
+import pytest
 import torch
 
 from alphagenome_pytorch.utils.sequence import onehot_to_sequence
@@ -30,9 +31,9 @@ def test_dataset_filters_split_and_rev(tmp_path: Path):
     input_tsv = tmp_path / "HepG2.tsv"
     spec = ConstructSpec.lentimpra_default()
 
-    train_ds = LentiMPRADataset(input_tsv, split="train", sequence_length=16, construct_spec=spec)
-    val_ds = LentiMPRADataset(input_tsv, split="val", sequence_length=16, construct_spec=spec)
-    test_ds = LentiMPRADataset(input_tsv, split="test", sequence_length=16, construct_spec=spec)
+    train_ds = LentiMPRADataset(input_tsv, split="train", construct_spec=spec)
+    val_ds = LentiMPRADataset(input_tsv, split="val", construct_spec=spec)
+    test_ds = LentiMPRADataset(input_tsv, split="test", construct_spec=spec)
 
     assert len(train_ds) == 1
     assert len(val_ds) == 1
@@ -45,7 +46,8 @@ def test_dataset_returns_fixed_length_onehot(tmp_path: Path):
         tmp_path / "HepG2.tsv",
         split="train",
         sequence_length=20,
-        construct_spec=ConstructSpec.lentimpra_default(),
+        construct_spec=ConstructSpec(left_adapter=None, right_adapter=None, promoter_seq=None, barcode_seq=None),
+        construct_mode="none",
     )
     seq, target = ds[0]
 
@@ -74,8 +76,8 @@ def test_dataset_supports_custom_folds(tmp_path: Path):
         tmp_path / "HepG2.tsv",
         split="train",
         train_folds=[10],
-        sequence_length=20,
-        construct_spec=ConstructSpec.lentimpra_default(),
+        construct_spec=ConstructSpec(left_adapter=None, right_adapter=None, promoter_seq=None, barcode_seq=None),
+        construct_mode="none",
     )
 
     assert len(ds) == 1
@@ -91,12 +93,13 @@ def test_dataset_optionally_includes_adapters(tmp_path: Path):
         split="train",
         sequence_length=32,
         construct_spec=spec,
+        construct_mode="all",
     )
 
     seq, _ = ds[0]
     assert torch.equal(seq[0], torch.tensor([1.0, 0.0, 0.0, 0.0]))
     assert torch.equal(seq[1], torch.tensor([1.0, 0.0, 0.0, 0.0]))
-    assert onehot_to_sequence(seq[:7].numpy()) == spec.assemble_sequence("AC", mode="core")
+    assert onehot_to_sequence(seq[:8].numpy()) == spec.assemble_sequence("AC", mode="all")
 
 
 def test_dataset_uses_construct_mode(tmp_path: Path):
@@ -107,11 +110,11 @@ def test_dataset_uses_construct_mode(tmp_path: Path):
         split="train",
         sequence_length=32,
         construct_spec=spec,
-        construct_mode="flanked",
+        construct_mode="promoter_barcode",
     )
 
     seq, _ = ds[0]
-    assert onehot_to_sequence(seq[:4].numpy()) == spec.assemble_sequence("AC", mode="flanked")
+    assert onehot_to_sequence(seq[:4].numpy()) == spec.assemble_sequence("AC", mode="promoter_barcode")
 
 
 def test_dataset_requires_construct_spec(tmp_path: Path):
@@ -123,6 +126,50 @@ def test_dataset_requires_construct_spec(tmp_path: Path):
         assert "construct_spec must be provided" in str(exc)
     else:
         raise AssertionError("Expected ValueError when construct_spec is omitted")
+
+
+def test_dataset_uses_natural_construct_length_when_length_omitted(tmp_path: Path):
+    _write_dataset(tmp_path)
+    spec = ConstructSpec(left_adapter="AA", right_adapter=None, promoter_seq="G", barcode_seq="T")
+    ds = LentiMPRADataset(
+        tmp_path / "HepG2.tsv",
+        split="train",
+        construct_spec=spec,
+        construct_mode="promoter_barcode",
+    )
+
+    seq, _ = ds[0]
+    assert seq.shape == (4, 4)
+    assert onehot_to_sequence(seq.numpy()) == spec.assemble_sequence("AC", mode="promoter_barcode")
+
+
+def test_dataset_pads_when_sequence_length_exceeds_construct_length(tmp_path: Path):
+    _write_dataset(tmp_path)
+    ds = LentiMPRADataset(
+        tmp_path / "HepG2.tsv",
+        split="train",
+        sequence_length=6,
+        construct_spec=ConstructSpec(left_adapter=None, right_adapter=None, promoter_seq=None, barcode_seq=None),
+        construct_mode="none",
+    )
+
+    seq, _ = ds[0]
+    assert seq.shape == (6, 4)
+    assert onehot_to_sequence(seq[:2].numpy()) == "AC"
+    assert torch.equal(seq[2:], torch.zeros(4, 4))
+
+
+def test_dataset_rejects_sequence_length_shorter_than_construct(tmp_path: Path):
+    _write_dataset(tmp_path)
+
+    with pytest.raises(ValueError, match="sequence_length is shorter than the assembled construct length"):
+        LentiMPRADataset(
+            tmp_path / "HepG2.tsv",
+            split="train",
+            sequence_length=1,
+            construct_spec=ConstructSpec(left_adapter=None, right_adapter=None, promoter_seq=None, barcode_seq=None),
+            construct_mode="none",
+        )
 
 
 def test_dataset_allows_variable_construct_lengths_when_length_omitted(tmp_path: Path):
@@ -140,7 +187,7 @@ def test_dataset_allows_variable_construct_lengths_when_length_omitted(tmp_path:
         tmp_path / "HepG2.tsv",
         split="train",
         construct_spec=ConstructSpec(left_adapter=None, right_adapter=None, promoter_seq=None, barcode_seq=None),
-        construct_mode="full",
+        construct_mode="none",
     )
 
     seq0, _ = ds[0]
