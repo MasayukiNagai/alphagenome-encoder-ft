@@ -40,7 +40,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--sequence_length", type=int, default=None)
-    parser.add_argument("--construct_mode", type=str, default=None, choices=["core", "flanked", "full"])
+    parser.add_argument(
+        "--construct_mode",
+        type=str,
+        default=None,
+        choices=["none", "adapters", "promoter", "promoter_barcode", "all"],
+    )
     parser.add_argument("--num_workers", type=int, default=None)
     parser.add_argument("--max_shift", type=int, default=None)
     parser.add_argument("--subset_frac", type=float, default=None)
@@ -196,6 +201,19 @@ def _make_dataset(config: TrainConfig, split: str) -> LentiMPRADataset:
     )
 
 
+def _resolve_effective_sequence_length(config: TrainConfig) -> int:
+    if config.data.sequence_length is not None:
+        return int(config.data.sequence_length)
+
+    probe_dataset = _make_dataset(config, "train")
+    if len(probe_dataset) == 0:
+        raise ValueError("Cannot infer sequence_length from an empty training split")
+
+    sequence_length = int(probe_dataset[0][0].shape[0])
+    config.data.sequence_length = sequence_length
+    return sequence_length
+
+
 def main() -> dict[str, Any]:
     parser = build_arg_parser()
     args = parser.parse_args()
@@ -207,6 +225,8 @@ def main() -> dict[str, Any]:
         parser.error(str(exc))
 
     _resolve_construct_defaults(config)
+    effective_sequence_length = _resolve_effective_sequence_length(config)
+    print(f"Effective sequence length: {effective_sequence_length}")
 
     torch.manual_seed(config.runtime.seed)
     device = torch.device(config.runtime.device or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -230,7 +250,7 @@ def main() -> dict[str, Any]:
         device=device,
         construct_spec=construct_spec,
     )
-    model.initialize_head(config.data.sequence_length, device)
+    model.initialize_head(effective_sequence_length, device)
     model.eval()
 
     n_trainable = sum(p.numel() for p in model.head.parameters())

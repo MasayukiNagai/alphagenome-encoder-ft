@@ -216,6 +216,7 @@ def main() -> dict[str, Any]:
         parser.error("data.input_tsv must be present in the checkpoint config or provided via --input_tsv")
 
     device = torch.device(config.runtime.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    print(f"Using device: {device}")
 
     default_output_dir = checkpoint_path.parent / f"{checkpoint_path.stem}_test_eval"
     output_dir = Path(args.output_dir).resolve() if args.output_dir is not None else default_output_dir.resolve()
