@@ -2,8 +2,8 @@
   "_comment": "Normalized config schema for LentiMPRA HepG2 training.",
   "data": {
     "input_tsv": null,
-    "sequence_length": 256,
-    "construct_mode": "flanked",
+    "sequence_length": null,
+    "construct_mode": "promoter_barcode",
     "batch_size": 32,
     "reverse_complement": true,
     "rc_prob": 0.5,
@@ -11,12 +11,11 @@
     "shift_prob": 0.5,
     "max_shift": 15,
     "subset_frac": 1.0,
-    "num_workers": 0,
-    "pin_memory": false
+    "num_workers": 4,
+    "pin_memory": true
   },
   "head": {
     "pooling_type": "flatten",
-    "center_bp": 256,
     "hidden_sizes": [1024],
     "dropout": 0.1,
     "activation": "relu"
@@ -50,6 +49,6 @@
   "runtime": {
     "device": null,
     "use_amp": false,
-    "seed": 42
+    "seed": 43
   }
 }
