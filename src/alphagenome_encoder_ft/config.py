@@ -45,8 +45,8 @@ def _deep_merge(base: dict[str, Any], overrides: Mapping[str, Any]) -> dict[str,
 @dataclass
 class DataConfig:
     input_tsv: str | None = None
-    sequence_length: int = 256
-    construct_mode: str = "flanked"
+    sequence_length: int | None = None
+    construct_mode: str = "promoter_barcode"
     batch_size: int = 32
     reverse_complement: bool = False
     rc_prob: float = 0.5
@@ -62,10 +62,12 @@ class DataConfig:
     barcode_seq: str | None = None
 
     def __post_init__(self) -> None:
-        if self.sequence_length <= 0:
+        if self.sequence_length is not None and self.sequence_length <= 0:
             raise ValueError("data.sequence_length must be > 0")
-        if self.construct_mode not in {"core", "flanked", "full"}:
-            raise ValueError("data.construct_mode must be one of core, flanked, full")
+        if self.construct_mode not in {"none", "adapters", "promoter", "promoter_barcode", "all"}:
+            raise ValueError(
+                "data.construct_mode must be one of none, adapters, promoter, promoter_barcode, all"
+            )
         if not 0 < self.subset_frac <= 1:
             raise ValueError("data.subset_frac must be in (0, 1]")
         if not 0 <= self.rc_prob <= 1:
@@ -83,7 +85,7 @@ class DataConfig:
 @dataclass
 class HeadConfig:
     pooling_type: str = "flatten"
-    center_bp: int = 256
+    center_bp: int | None = None
     hidden_sizes: list[int] = field(default_factory=lambda: [1024])
     dropout: float = 0.1
     activation: str = "relu"
@@ -92,7 +94,7 @@ class HeadConfig:
         self.hidden_sizes = parse_hidden_sizes(self.hidden_sizes)
         if self.pooling_type not in {"flatten", "center", "mean", "sum", "max"}:
             raise ValueError("head.pooling_type must be one of flatten, center, mean, sum, max")
-        if self.center_bp <= 0:
+        if self.center_bp is not None and self.center_bp <= 0:
             raise ValueError("head.center_bp must be > 0")
         if not 0 <= self.dropout < 1:
             raise ValueError("head.dropout must be in [0, 1)")

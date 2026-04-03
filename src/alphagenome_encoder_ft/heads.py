@@ -34,7 +34,32 @@ def _make_activation(name: str) -> nn.Module:
 
 
 class MPRAHead(nn.Module):
-    """Scalar regression head over encoder outputs."""
+    """Scalar regression head over encoder outputs.
+
+    The head consumes AlphaGenome encoder features with shape ``(B, L, D)``,
+    where ``B`` is batch size, ``L`` is the number of encoder positions, and
+    ``D`` is the encoder channel dimension (1536).
+
+    Pooling behavior depends on ``pooling_type``:
+
+    - flatten:
+      ``(B, L, D) -> (B, L * D) -> hidden MLP -> (B, 1) -> (B,)``
+      All encoder positions are flattened into a single feature vector before prediction.
+      ``center_bp`` is ignored.
+
+    - center:
+      ``(B, L, D) -> position-wise hidden MLP -> (B, L, 1) -> pick L // 2 -> (B,)``
+      The hidden stack and output layer are applied independently at each
+      encoder position, and only the exact center position is used. ``center_bp``
+      is ignored.
+
+    - mean / sum / max:
+      ``(B, L, D) -> position-wise hidden MLP -> (B, L, 1) -> centered window -> reduce -> (B,)``
+      The model first produces a scalar prediction per encoder position, then
+      reduces over a centered window of positions. The window size is
+      ``max(1, center_bp // 128)`` because encoder features are at 128 bp
+      resolution.
+    """
 
     def __init__(
         self,
@@ -47,7 +72,7 @@ class MPRAHead(nn.Module):
         super().__init__()
         if pooling_type not in {"flatten", "center", "mean", "sum", "max"}:
             raise ValueError(f"Unknown pooling_type: {pooling_type}")
-        if center_bp <= 0:
+        if pooling_type in {"mean", "sum", "max"} and center_bp <= 0:
             raise ValueError("center_bp must be > 0")
         if dropout is not None and not 0 <= dropout < 1:
             raise ValueError("dropout must be in [0, 1)")
@@ -58,42 +83,42 @@ class MPRAHead(nn.Module):
         self.dropout = dropout
         self.activation = activation
         self.norm = nn.LayerNorm(ENCODER_DIM)
+        self.hidden_layers = nn.ModuleList()
+        in_features: int | None = None
+        for hidden_size in self.hidden_sizes:
+            linear = nn.LazyLinear(hidden_size) if in_features is None else nn.Linear(in_features, hidden_size)
+            self.hidden_layers.append(linear)
+            in_features = hidden_size
+        assert in_features is not None
+        self.output_layer = nn.Linear(in_features, 1)
 
-        layers: list[nn.Module] = []
-        layers.append(nn.LazyLinear(self.hidden_sizes[0]))
-        previous_size = self.hidden_sizes[0]
-        for hidden_size in self.hidden_sizes[1:]:
-            layers.append(_make_activation(self.activation))
+    def _apply_hidden_layers(self, x: torch.Tensor) -> torch.Tensor:
+        for linear in self.hidden_layers:
+            x = linear(x)
             if self.dropout is not None:
-                layers.append(nn.Dropout(self.dropout))
-            layers.append(nn.Linear(previous_size, hidden_size))
-            previous_size = hidden_size
-        layers.append(_make_activation(self.activation))
-        if self.dropout is not None:
-            layers.append(nn.Dropout(self.dropout))
-        layers.append(nn.Linear(previous_size, 1))
-        self.mlp = nn.Sequential(*layers)
+                x = nn.functional.dropout(x, p=self.dropout, training=self.training)
+            x = _make_activation(self.activation)(x)
+        return x
 
-    def _pool(self, encoder_output: torch.Tensor) -> torch.Tensor:
+    def _normalize_encoder_output(self, encoder_output: torch.Tensor) -> torch.Tensor:
         x = encoder_output
         if x.ndim == 3 and x.shape[-1] != ENCODER_DIM and x.shape[1] == ENCODER_DIM:
             x = x.transpose(1, 2)
-        x = self.norm(x)
-        if self.pooling_type == "flatten":
-            return x.flatten(1)
+        return self.norm(x)
 
-        if x.ndim != 3:
-            raise ValueError(f"Expected encoder output rank 3, got {x.ndim}")
+    def _pool_predictions(self, preds: torch.Tensor) -> torch.Tensor:
+        if preds.ndim != 3:
+            raise ValueError(f"Expected per-position predictions rank 3, got {preds.ndim}")
 
-        seq_len = x.shape[1]
+        seq_len = preds.shape[1]
         if self.pooling_type == "center":
             center_idx = seq_len // 2
-            return x[:, center_idx, :]
+            return preds[:, center_idx, 0]
 
         window_positions = max(1, self.center_bp // ENCODER_RESOLUTION_BP)
         window_positions = min(window_positions, seq_len)
         start = max((seq_len - window_positions) // 2, 0)
-        center_window = x[:, start : start + window_positions, :]
+        center_window = preds[:, start : start + window_positions, 0]
 
         if self.pooling_type == "mean":
             return center_window.mean(dim=1)
@@ -104,6 +129,13 @@ class MPRAHead(nn.Module):
         raise RuntimeError(f"Unhandled pooling type: {self.pooling_type}")
 
     def forward(self, encoder_output: torch.Tensor) -> torch.Tensor:
-        pooled = self._pool(encoder_output)
-        preds = self.mlp(pooled)
-        return preds.squeeze(-1)
+        x = self._normalize_encoder_output(encoder_output)
+        if self.pooling_type == "flatten":
+            x = x.flatten(1)
+            x = self._apply_hidden_layers(x)
+            preds = self.output_layer(x)
+            return preds.squeeze(-1)
+
+        x = self._apply_hidden_layers(x)
+        preds = self.output_layer(x)
+        return self._pool_predictions(preds)

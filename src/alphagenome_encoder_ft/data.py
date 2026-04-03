@@ -35,7 +35,7 @@ class LentiMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         valid_folds: list[int] | None = None,
         test_folds: list[int] | None = None,
         construct_spec: ConstructSpec | None = None,
-        construct_mode: str = "core",
+        construct_mode: str = "all",
         reverse_complement: bool = False,
         rc_prob: float = 0.5,
         random_shift: bool = False,
@@ -97,6 +97,22 @@ class LentiMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
 
         self._payloads = [str(row["seq"]) for row in rows]
         self._targets = np.asarray([float(row["mean_value"]) for row in rows], dtype=np.float32)
+        self._construct_lengths = [
+            len(self.construct_spec.assemble_sequence(payload, mode=self.construct_mode))
+            for payload in self._payloads
+        ]
+        if self.sequence_length is not None:
+            too_long = [
+                (idx, construct_length)
+                for idx, construct_length in enumerate(self._construct_lengths)
+                if construct_length > self.sequence_length
+            ]
+            if too_long:
+                sample_idx, sample_length = too_long[0]
+                raise ValueError(
+                    "sequence_length is shorter than the assembled construct length "
+                    f"for sample {sample_idx}: {self.sequence_length} < {sample_length}"
+                )
 
     def _read_tsv(self) -> list[dict[str, str]]:
         split_folds = {
@@ -119,14 +135,12 @@ class LentiMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
     def __len__(self) -> int:
         return len(self._payloads)
 
-    def _pad_or_trim(self, onehot: np.ndarray) -> np.ndarray:
+    def _pad_to_length(self, onehot: np.ndarray) -> np.ndarray:
         if self.sequence_length is None:
             return onehot.astype(np.float32, copy=False)
         length = onehot.shape[0]
         if length == self.sequence_length:
             return onehot.astype(np.float32, copy=False)
-        if length > self.sequence_length:
-            return onehot[: self.sequence_length].astype(np.float32, copy=False)
 
         padded = np.zeros((self.sequence_length, 4), dtype=np.float32)
         padded[:length] = onehot.astype(np.float32, copy=False)
@@ -148,7 +162,7 @@ class LentiMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         )
         onehot = sequence_to_onehot(construct).astype(np.float32, copy=False)
         onehot = self._augment(onehot)
-        onehot = self._pad_or_trim(onehot)
+        onehot = self._pad_to_length(onehot)
         target = np.float32(self._targets[index])
         return torch.from_numpy(onehot), torch.tensor(target, dtype=torch.float32)
 

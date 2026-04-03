@@ -397,6 +397,13 @@ def run_training_stage(
                 metric_fns=metric_fns,
                 use_amp=config.runtime.use_amp,
             )
+            # ``evaluate`` switches the module to eval mode; restore the active
+            # training mode before continuing with the rest of the epoch.
+            if train_encoder:
+                model.train()
+            else:
+                model.eval()
+                model.head.train()
             current_epoch = start_epoch + epoch_idx + (batch_idx / total_batches)
             history["val_loss"].append(val_metrics["loss"])
             history["val_pearson"].append(val_metrics.get("pearson", float("nan")))

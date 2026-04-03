@@ -125,6 +125,7 @@ class EncoderMPRAModel(nn.Module):
             MPRAHead(**head_config.__dict__),
             construct_spec=construct_spec,
         )
+        model.to(device)
         sequence_length = construct_config.get("sequence_length")
         if sequence_length is None:
             config = checkpoint.get("config", {})
