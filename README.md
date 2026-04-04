@@ -17,6 +17,10 @@ Install directly from GitHub:
 pip install "alphagenome-encoder-ft @ git+https://github.com/MasayukiNagai/alphagenome_encoder_ft.git"
 ```
 
+```bash
+uv add "alphagenome-encoder-ft @ git+https://github.com/MasayukiNagai/alphagenome_encoder_ft.git"
+```
+
 For local development:
 ```bash
 git clone https://github.com/MasayukiNagai/alphagenome_encoder_ft.git
