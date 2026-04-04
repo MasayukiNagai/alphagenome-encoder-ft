@@ -17,31 +17,13 @@ Install directly from GitHub:
 pip install "alphagenome-encoder-ft @ git+https://github.com/MasayukiNagai/alphagenome_encoder_ft.git"
 ```
 
-For training, evaluation, and tests, also install:
-
-```bash
-pip install tqdm wandb matplotlib pytest
-```
-
-For local development with `uv`:
-
-```bash
-git clone https://github.com/MasayukiNagai/alphagenome_encoder_ft.git
-cd alphagenome-encoder-ft
-uv sync
-
-# To include libraries for training
-uv sync --group train
-```
-
-For local development with `pip`:
-
+For local development:
 ```bash
 git clone https://github.com/MasayukiNagai/alphagenome_encoder_ft.git
 cd alphagenome-encoder-ft
 pip install -e .
 # For training, evaluation, tests
-pip install tqdm wandb matplotlib pytest
+pip install wandb matplotlib pytest
 ```
 
 ## Repository Layout
