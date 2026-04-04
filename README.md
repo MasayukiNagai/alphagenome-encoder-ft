@@ -88,7 +88,7 @@ The evaluator reconstructs the model from the checkpoint config, runs the `test`
 ```python
 from alphagenome_encoder_ft import EncoderMPRAModel
 
-model = EncoderMPRAModel.from_checkpoint("/path/to/best.pt", device="cuda")
+model = EncoderMPRAModel.from_checkpoint("/path/to/best.pt")
 construct = model.construct_spec.assemble_sequence("ACGT", mode="promoter_barcode")
 ```
 

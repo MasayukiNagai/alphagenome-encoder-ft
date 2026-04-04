@@ -184,6 +184,35 @@ def test_from_checkpoint_roundtrip_full(tmp_path: Path):
     assert restored.construct_spec == construct_spec
 
 
+def test_from_checkpoint_defaults_to_inferred_device(tmp_path: Path):
+    torch.manual_seed(0)
+    construct_spec = ConstructSpec(left_adapter="A", right_adapter="C", promoter_seq="G", barcode_seq="T")
+    model = EncoderMPRAModel(
+        DummyAlphaGenome(),
+        MPRAHead(pooling_type="flatten", hidden_sizes=8),
+        construct_spec=construct_spec,
+    )
+    model.initialize_head(sequence_length=2, device="cpu")
+    model.eval()
+
+    checkpoint_path = save_checkpoint(
+        tmp_path / "best_default_device.pt",
+        model,
+        config=_make_config(tmp_path, save_mode="minimal"),
+        save_mode="minimal",
+        stage="stage1",
+        epoch=1,
+    )
+
+    restored = EncoderMPRAModel.from_checkpoint(
+        checkpoint_path,
+        backbone_factory=DummyAlphaGenome,
+    )
+    expected_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    assert next(restored.parameters()).device == expected_device
+    assert restored.construct_spec == construct_spec
+
+
 def test_from_checkpoint_rejects_head_only_checkpoint(tmp_path: Path):
     model = EncoderMPRAModel(DummyAlphaGenome(), MPRAHead(pooling_type="flatten", hidden_sizes=8))
     model.initialize_head(sequence_length=2, device="cpu")

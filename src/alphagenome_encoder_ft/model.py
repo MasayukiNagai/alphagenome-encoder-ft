@@ -80,16 +80,23 @@ class EncoderMPRAModel(nn.Module):
                 seen.add(id(param))
         return deduped
 
+    @staticmethod
+    def _resolve_device(device: torch.device | str | None) -> torch.device:
+        if device is None:
+            return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return torch.device(device)
+
     @classmethod
     def from_pretrained(
         cls,
         pretrained_weights: str | Path,
         head_config: HeadConfig,
         *,
-        device: torch.device | str,
+        device: torch.device | str | None = None,
         construct_spec: ConstructSpec | None = None,
         backbone_factory=AlphaGenome,
     ) -> "EncoderMPRAModel":
+        device = cls._resolve_device(device)
         backbone = backbone_factory()
         backbone = load_trunk(backbone, pretrained_weights, exclude_heads=True)
         backbone = remove_all_heads(backbone)
@@ -103,9 +110,10 @@ class EncoderMPRAModel(nn.Module):
         cls,
         checkpoint_path: str | Path,
         *,
-        device: torch.device | str,
+        device: torch.device | str | None = None,
         backbone_factory=AlphaGenome,
     ) -> "EncoderMPRAModel":
+        device = cls._resolve_device(device)
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         save_mode = checkpoint.get("save_mode", "minimal")
         if save_mode == "head":
