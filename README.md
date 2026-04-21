@@ -6,6 +6,17 @@ This repository is built on top of [`alphagenome-pytorch`](https://github.com/ge
 
 Note: The current codebase does not yet include the full feature surface of `alphagenome_FT_MPRA`, such as attribution pipelines, cached embedding workflows, or the full collection of benchmarking and downstream analysis scripts.
 
+## Supported heads
+
+| `head_type` | Class | Outputs | Default use |
+|-------------|-------|---------|-------------|
+| `mpra` (default) | `MPRAHead` | 1 scalar per sequence | LentiMPRA-style scalar regression |
+| `deepstarr` | `DeepSTARRHead` | 2 scalars per sequence (dev, hk) | Drosophila STARR-seq dual-output regression |
+
+Both heads share the same pooling modes (`flatten`, `center`, `mean`, `sum`, `max`) and the same `LayerNorm → MLP → Linear` layout; `DeepSTARRHead` is a subclass of `MPRAHead` whose only functional difference is `num_outputs=2`.
+
+Checkpoints persist a top-level `head_type` field so `EncoderMPRAModel.from_checkpoint(...)` can dispatch to the right class. Checkpoints written before this field existed (no `head_type` key) default to `"mpra"` for backward compatibility.
+
 ## Installation
 
 `alphagenome-encoder-ft` requires Python 3.12+ and depends on
@@ -38,8 +49,8 @@ alphagenome-encoder-ft/
 │   ├── __init__.py
 │   ├── config.py     # default configs for each cell type
 │   ├── constructs.py # ConstructSpec assembly rules
-│   ├── data.py       # lentiMPRA dataset and dataloader helpers
-│   ├── heads.py      # MPRAHead
+│   ├── data.py       # lentiMPRA + DeepSTARR datasets and dataloader helpers
+│   ├── heads.py      # MPRAHead, DeepSTARRHead
 │   ├── model.py      # EncoderMPRAModel wrapper (AG Encoder + MPRAHead)
 │   └── train.py      # reusable encoder-only training utilities
 ├── configs/

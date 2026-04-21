@@ -89,6 +89,8 @@ class HeadConfig:
     hidden_sizes: list[int] = field(default_factory=lambda: [1024])
     dropout: float = 0.1
     activation: str = "relu"
+    head_type: str = "mpra"
+    num_outputs: int = 1
 
     def __post_init__(self) -> None:
         self.hidden_sizes = parse_hidden_sizes(self.hidden_sizes)
@@ -100,6 +102,10 @@ class HeadConfig:
             raise ValueError("head.dropout must be in [0, 1)")
         if self.activation not in {"relu", "gelu"}:
             raise ValueError("head.activation must be 'relu' or 'gelu'")
+        if self.head_type not in {"mpra", "deepstarr"}:
+            raise ValueError("head.head_type must be one of mpra, deepstarr")
+        if self.num_outputs < 1:
+            raise ValueError("head.num_outputs must be >= 1")
 
 
 @dataclass
@@ -211,6 +217,7 @@ class TrainConfig:
             "hidden_sizes": list(self.head.hidden_sizes),
             "dropout": self.head.dropout,
             "activation": self.head.activation,
+            "num_outputs": self.head.num_outputs,
         }
 
     def construct_config(self) -> dict[str, Any]:
@@ -256,3 +263,35 @@ def load_train_config(path: str | Path | None) -> TrainConfig:
 def merge_train_config(config: TrainConfig, overrides: Mapping[str, Any]) -> TrainConfig:
     merged = _deep_merge(config.to_dict(), overrides)
     return TrainConfig.from_dict(merged)
+
+
+# head registry: maps a ``head_type`` string to the corresponding head class.
+# kept lazy to avoid a circular import on heads.py at module load.
+def _resolve_head_class(head_type: str):
+    from .heads import MPRAHead, DeepSTARRHead
+
+    registry = {"mpra": MPRAHead, "deepstarr": DeepSTARRHead}
+    if head_type not in registry:
+        raise ValueError(
+            f"Unknown head_type {head_type!r}; known: {sorted(registry)}"
+        )
+    return registry[head_type]
+
+
+def build_head(head_type: str, head_config: Mapping[str, Any]):
+    """Instantiate a head by ``head_type`` string.
+
+    Unknown keys (e.g. a stray ``head_type`` field) and None-valued keys are dropped
+    so the head class sees only its own supported kwargs and falls back on defaults
+    for anything omitted.
+    """
+
+    cls = _resolve_head_class(head_type)
+    import inspect
+
+    accepted = set(inspect.signature(cls).parameters)
+    kwargs = {
+        k: v for k, v in head_config.items()
+        if k in accepted and v is not None
+    }
+    return cls(**kwargs)

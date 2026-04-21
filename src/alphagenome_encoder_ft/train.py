@@ -43,6 +43,19 @@ def _pearson_r(preds: Tensor, targets: Tensor, eps: float = 1e-8) -> Tensor:
     return (preds_centered * targets_centered).sum() / (denom + eps)
 
 
+# per-track pearson when preds/targets are (N, K); returns one scalar per track.
+def _pearson_r_per_track(preds: Tensor, targets: Tensor, eps: float = 1e-8) -> list[float]:
+    if preds.ndim != 2 or targets.ndim != 2 or preds.shape[1] < 2:
+        return []
+    preds = preds.float()
+    targets = targets.float()
+    scores: list[float] = []
+    for track in range(preds.shape[1]):
+        r = _pearson_r(preds[:, track], targets[:, track], eps=eps)
+        scores.append(float(r.detach().cpu().item()))
+    return scores
+
+
 def _compute_metrics(
     preds: Tensor,
     targets: Tensor,
@@ -55,6 +68,11 @@ def _compute_metrics(
         if isinstance(value, Tensor):
             value = value.detach().float().cpu().item()
         metrics[name] = float(value)
+
+    # multi-output heads (e.g. DeepSTARR dev+hk): also report per-track pearson.
+    per_track = _pearson_r_per_track(preds, targets)
+    for idx, score in enumerate(per_track):
+        metrics[f"pearson_track{idx}"] = score
     return metrics
 
 
@@ -266,6 +284,7 @@ def save_checkpoint(
         "stage": stage,
         "epoch": epoch,
         "config": config.to_dict(),
+        "head_type": config.head.head_type,
         "head_state_dict": model.head.state_dict(),
         "head_config": config.head_kwargs(),
         "construct_config": config.construct_config(),
