@@ -68,6 +68,7 @@ class MPRAHead(nn.Module):
         hidden_sizes: int | Sequence[int] = 1024,
         dropout: float | None = 0.1,
         activation: Literal["relu", "gelu"] = "relu",
+        num_outputs: int = 1,
     ) -> None:
         super().__init__()
         if pooling_type not in {"flatten", "center", "mean", "sum", "max"}:
@@ -76,12 +77,15 @@ class MPRAHead(nn.Module):
             raise ValueError("center_bp must be > 0")
         if dropout is not None and not 0 <= dropout < 1:
             raise ValueError("dropout must be in [0, 1)")
+        if num_outputs < 1:
+            raise ValueError("num_outputs must be >= 1")
 
         self.pooling_type = pooling_type
         self.center_bp = center_bp
         self.hidden_sizes = _parse_hidden_sizes(hidden_sizes)
         self.dropout = dropout
         self.activation = activation
+        self.num_outputs = int(num_outputs)
         self.norm = nn.LayerNorm(ENCODER_DIM)
         self.hidden_layers = nn.ModuleList()
         in_features: int | None = None
@@ -90,7 +94,7 @@ class MPRAHead(nn.Module):
             self.hidden_layers.append(linear)
             in_features = hidden_size
         assert in_features is not None
-        self.output_layer = nn.Linear(in_features, 1)
+        self.output_layer = nn.Linear(in_features, self.num_outputs)
 
     def _apply_hidden_layers(self, x: torch.Tensor) -> torch.Tensor:
         for linear in self.hidden_layers:
@@ -107,26 +111,28 @@ class MPRAHead(nn.Module):
         return self.norm(x)
 
     def _pool_predictions(self, preds: torch.Tensor) -> torch.Tensor:
+        # preds: (B, L, K). For K==1, squeeze(-1) to preserve the legacy (B,) output.
         if preds.ndim != 3:
             raise ValueError(f"Expected per-position predictions rank 3, got {preds.ndim}")
 
         seq_len = preds.shape[1]
         if self.pooling_type == "center":
             center_idx = seq_len // 2
-            return preds[:, center_idx, 0]
-
-        window_positions = max(1, self.center_bp // ENCODER_RESOLUTION_BP)
-        window_positions = min(window_positions, seq_len)
-        start = max((seq_len - window_positions) // 2, 0)
-        center_window = preds[:, start : start + window_positions, 0]
-
-        if self.pooling_type == "mean":
-            return center_window.mean(dim=1)
-        if self.pooling_type == "sum":
-            return center_window.sum(dim=1)
-        if self.pooling_type == "max":
-            return center_window.max(dim=1).values
-        raise RuntimeError(f"Unhandled pooling type: {self.pooling_type}")
+            pooled = preds[:, center_idx, :]
+        else:
+            window_positions = max(1, self.center_bp // ENCODER_RESOLUTION_BP)
+            window_positions = min(window_positions, seq_len)
+            start = max((seq_len - window_positions) // 2, 0)
+            center_window = preds[:, start : start + window_positions, :]
+            if self.pooling_type == "mean":
+                pooled = center_window.mean(dim=1)
+            elif self.pooling_type == "sum":
+                pooled = center_window.sum(dim=1)
+            elif self.pooling_type == "max":
+                pooled = center_window.max(dim=1).values
+            else:
+                raise RuntimeError(f"Unhandled pooling type: {self.pooling_type}")
+        return pooled.squeeze(-1) if self.num_outputs == 1 else pooled
 
     def forward(self, encoder_output: torch.Tensor) -> torch.Tensor:
         x = self._normalize_encoder_output(encoder_output)
@@ -134,8 +140,36 @@ class MPRAHead(nn.Module):
             x = x.flatten(1)
             x = self._apply_hidden_layers(x)
             preds = self.output_layer(x)
-            return preds.squeeze(-1)
+            return preds.squeeze(-1) if self.num_outputs == 1 else preds
 
         x = self._apply_hidden_layers(x)
         preds = self.output_layer(x)
         return self._pool_predictions(preds)
+
+
+class DeepSTARRHead(MPRAHead):
+    """Dual-output regression head for Drosophila STARR-seq (dev + hk).
+
+    Mirrors Al Murphy's JAX ``DeepSTARRHead`` in ``alphagenome_ft_mpra/mpra_heads.py``:
+    same pooling modes, same configuration surface, same ``LayerNorm → MLP → Linear``
+    layout. Architecture and state_dict keys are inherited from :class:`MPRAHead`,
+    with ``num_outputs`` defaulted to 2 (``dev``, ``hk`` enhancer activity).
+    """
+
+    def __init__(
+        self,
+        pooling_type: PoolingType = "flatten",
+        center_bp: int = 256,
+        hidden_sizes: int | Sequence[int] = 2048,
+        dropout: float | None = 0.5,
+        activation: Literal["relu", "gelu"] = "relu",
+        num_outputs: int = 2,
+    ) -> None:
+        super().__init__(
+            pooling_type=pooling_type,
+            center_bp=center_bp,
+            hidden_sizes=hidden_sizes,
+            dropout=dropout,
+            activation=activation,
+            num_outputs=num_outputs,
+        )

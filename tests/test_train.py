@@ -7,10 +7,10 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, TensorDataset
 
 from alphagenome_encoder_ft.config import OptimConfig, TrainConfig
-from alphagenome_encoder_ft.heads import MPRAHead
+from alphagenome_encoder_ft.heads import DeepSTARRHead, MPRAHead
 from alphagenome_encoder_ft.model import EncoderMPRAModel
 import alphagenome_encoder_ft.train as train_module
-from alphagenome_encoder_ft.train import create_scheduler, evaluate, load_checkpoint, run_training_stage, run_two_stage_training
+from alphagenome_encoder_ft.train import create_scheduler, evaluate, load_checkpoint, run_training_stage, run_two_stage_training, save_checkpoint
 
 
 class DummyAlphaGenome(torch.nn.Module):
@@ -351,3 +351,88 @@ def test_train_config_rejects_invalid_plateau_settings():
         assert "optim.plateau_factor" in str(exc)
     else:
         raise AssertionError("Expected ValueError for invalid plateau_factor")
+
+
+def test_save_checkpoint_persists_head_type_mpra_default(tmp_path: Path):
+    model = _make_model()
+    config = _make_config(tmp_path)
+    path = save_checkpoint(
+        tmp_path / "mpra.pt",
+        model,
+        config=config,
+        save_mode="minimal",
+        stage="stage1",
+        epoch=1,
+        metrics={"pearson": 0.5},
+    )
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    assert payload["head_type"] == "mpra"
+    assert payload["head_config"]["num_outputs"] == 1
+
+
+def test_from_checkpoint_without_head_type_defaults_to_mpra(tmp_path: Path):
+    # mimic a pre-PR checkpoint: no head_type field on the payload at all.
+    model = _make_model()
+    config = _make_config(tmp_path)
+    path = save_checkpoint(
+        tmp_path / "legacy.pt",
+        model,
+        config=config,
+        save_mode="minimal",
+        stage="stage1",
+        epoch=1,
+    )
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    payload.pop("head_type", None)
+    payload["head_config"].pop("head_type", None)
+    torch.save(payload, path)
+
+    restored = torch.load(path, map_location="cpu", weights_only=False)
+    assert "head_type" not in restored
+    # dispatch logic inside EncoderMPRAModel.from_checkpoint reads
+    # checkpoint.get("head_type", ..., "mpra"); re-exercise that path directly here.
+    from alphagenome_encoder_ft.config import build_head
+    head = build_head(
+        restored.get("head_type", restored.get("head_config", {}).get("head_type", "mpra")),
+        restored.get("head_config", {}),
+    )
+    assert isinstance(head, MPRAHead)
+    assert not isinstance(head, DeepSTARRHead)
+
+
+def test_save_checkpoint_persists_head_type_deepstarr(tmp_path: Path):
+    # build a deepstarr config and a matching model, assert the saved payload
+    # carries the dispatch field.
+    config = TrainConfig.from_dict(
+        {
+            "data": {"input_tsv": "/tmp/mock.tsv", "sequence_length": 256},
+            "head": {
+                "head_type": "deepstarr",
+                "pooling_type": "flatten",
+                "hidden_sizes": [8],
+                "center_bp": 256,
+                "dropout": 0.5,
+                "activation": "relu",
+                "num_outputs": 2,
+            },
+            "checkpoint": {
+                "pretrained_weights": "/tmp/weights.pt",
+                "checkpoint_dir": str(tmp_path),
+                "save_mode": "minimal",
+            },
+            "stage": {"second_stage_lr": 1e-3},
+        }
+    )
+    model = EncoderMPRAModel(DummyAlphaGenome(), DeepSTARRHead(pooling_type="flatten", hidden_sizes=8))
+    model.initialize_head(sequence_length=2, device="cpu")
+    path = save_checkpoint(
+        tmp_path / "deepstarr.pt",
+        model,
+        config=config,
+        save_mode="minimal",
+        stage="stage1",
+        epoch=1,
+    )
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    assert payload["head_type"] == "deepstarr"
+    assert payload["head_config"]["num_outputs"] == 2

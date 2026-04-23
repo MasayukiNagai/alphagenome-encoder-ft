@@ -12,7 +12,7 @@ from alphagenome_pytorch import AlphaGenome
 from alphagenome_pytorch.extensions.finetuning.transfer import load_trunk, remove_all_heads
 from alphagenome_pytorch.utils.sequence import sequence_to_onehot_tensor
 
-from .config import HeadConfig
+from .config import HeadConfig, build_head
 from .constructs import ConstructSpec
 from .heads import MPRAHead
 
@@ -128,12 +128,15 @@ class EncoderMPRAModel(nn.Module):
         device: torch.device | str | None = None,
         construct_spec: ConstructSpec | None = None,
         backbone_factory=AlphaGenome,
+        head_type: str | None = None,
     ) -> "EncoderMPRAModel":
         device = cls._resolve_device(device)
         backbone = backbone_factory()
         backbone = load_trunk(backbone, pretrained_weights, exclude_heads=True)
         backbone = remove_all_heads(backbone)
-        model = cls(backbone, MPRAHead(**head_config.__dict__), construct_spec=construct_spec)
+        resolved_head_type = head_type or getattr(head_config, "head_type", "mpra")
+        head = build_head(resolved_head_type, head_config.__dict__)
+        model = cls(backbone, head, construct_spec=construct_spec)
         model.set_encoder_trainable(False)
         model.to(device)
         return model
@@ -152,7 +155,9 @@ class EncoderMPRAModel(nn.Module):
         if save_mode == "head":
             raise ValueError("Head-only checkpoints cannot be loaded standalone")
 
-        head_config = HeadConfig(**checkpoint.get("head_config", {}))
+        head_config_dict = dict(checkpoint.get("head_config", {}))
+        # backward compat: historical ckpts omit head_type; default to "mpra".
+        head_type = checkpoint.get("head_type", head_config_dict.get("head_type", "mpra"))
         construct_config = checkpoint.get("construct_config", {})
         construct_spec = ConstructSpec(
             left_adapter=construct_config.get("left_adapter"),
@@ -163,7 +168,7 @@ class EncoderMPRAModel(nn.Module):
 
         model = cls(
             backbone_factory(),
-            MPRAHead(**head_config.__dict__),
+            build_head(head_type, head_config_dict),
             construct_spec=construct_spec,
         )
         model.to(device)

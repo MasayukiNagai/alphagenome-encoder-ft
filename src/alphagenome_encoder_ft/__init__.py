@@ -9,10 +9,14 @@ __all__ = [
     "LoggingConfig",
     "RuntimeConfig",
     "TrainConfig",
+    "build_head",
     "load_train_config",
     "merge_train_config",
     "parse_hidden_sizes",
     "LentiMPRADataset",
+    "DeepSTARRDataset",
+    "DEEPSTARR_ADAPTER_UP",
+    "DEEPSTARR_ADAPTER_DOWN",
     "create_dataloader",
     "ConstructSpec",
     "LENTIMPRA_BARCODE",
@@ -21,6 +25,7 @@ __all__ = [
     "LENTIMPRA_RIGHT_ADAPTER",
     "EncoderMPRAModel",
     "MPRAHead",
+    "DeepSTARRHead",
     "train_epoch",
     "evaluate",
     "run_training_stage",
@@ -37,6 +42,9 @@ __all__ = [
 def __getattr__(name: str):
     if name in {
         "LentiMPRADataset",
+        "DeepSTARRDataset",
+        "DEEPSTARR_ADAPTER_UP",
+        "DEEPSTARR_ADAPTER_DOWN",
         "create_dataloader",
     }:
         from . import data
@@ -61,6 +69,7 @@ def __getattr__(name: str):
         "LoggingConfig",
         "RuntimeConfig",
         "TrainConfig",
+        "build_head",
         "load_train_config",
         "merge_train_config",
         "parse_hidden_sizes",
@@ -72,10 +81,10 @@ def __getattr__(name: str):
         from . import model
 
         return getattr(model, name)
-    if name == "MPRAHead":
-        from .heads import MPRAHead
+    if name in {"MPRAHead", "DeepSTARRHead"}:
+        from . import heads
 
-        return MPRAHead
+        return getattr(heads, name)
     if name in {
         "train_epoch",
         "evaluate",
