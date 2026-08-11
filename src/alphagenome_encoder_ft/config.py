@@ -151,6 +151,8 @@ class StageConfig:
     val_evals_per_epoch: int = 1
     second_stage_lr: float | None = None
     second_stage_epochs: int = 10
+    second_stage_dropout: float | None = None
+    second_stage_lr_scheduler: str | None = None
     resume_from_stage2: bool = False
 
     def __post_init__(self) -> None:
@@ -164,6 +166,15 @@ class StageConfig:
             raise ValueError("stage.second_stage_lr must be > 0 when set")
         if self.second_stage_epochs <= 0:
             raise ValueError("stage.second_stage_epochs must be > 0")
+        if self.second_stage_dropout is not None and not 0 <= self.second_stage_dropout < 1:
+            raise ValueError("stage.second_stage_dropout must be in [0, 1) when set")
+        if (
+            self.second_stage_lr_scheduler is not None
+            and self.second_stage_lr_scheduler not in {"constant", "cosine", "plateau"}
+        ):
+            raise ValueError(
+                "stage.second_stage_lr_scheduler must be one of constant, cosine, plateau"
+            )
 
 
 @dataclass
