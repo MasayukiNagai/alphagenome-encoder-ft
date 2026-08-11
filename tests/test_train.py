@@ -174,6 +174,75 @@ def test_resume_from_stage2_loads_stage1_checkpoint(tmp_path: Path):
     assert result["stage2"]["best_checkpoint_path"] is not None
 
 
+def test_two_stage_training_applies_second_stage_dropout_and_scheduler(tmp_path: Path, monkeypatch):
+    model = _make_model()
+    loader = _make_loader()
+    config = _make_config(tmp_path)
+    config.stage.second_stage_dropout = 0.25
+    config.stage.second_stage_lr_scheduler = "plateau"
+
+    built = []
+    real_create_scheduler = train_module.create_scheduler
+
+    def spy_create_scheduler(optim_config, optimizer, total_epochs):
+        scheduler = real_create_scheduler(optim_config, optimizer, total_epochs)
+        built.append((optim_config, scheduler))
+        return scheduler
+
+    monkeypatch.setattr(train_module, "create_scheduler", spy_create_scheduler)
+
+    run_two_stage_training(
+        model,
+        loader,
+        stage1_optimizer=torch.optim.Adam(model.head.parameters(), lr=1e-2),
+        stage2_optimizer_factory=lambda model_obj: torch.optim.Adam(
+            model_obj.trainable_parameters(include_encoder=True),
+            lr=1e-3,
+        ),
+        config=config,
+        device="cpu",
+    )
+
+    # The head dropout is raised for the encoder-unfrozen stage, and the stage-2
+    # scheduler is built from second_stage_lr_scheduler at the second-stage lr.
+    assert model.head.dropout == 0.25
+    assert len(built) == 1
+    stage2_optim_config, stage2_scheduler = built[0]
+    assert stage2_optim_config.lr_scheduler == "plateau"
+    assert stage2_optim_config.learning_rate == config.stage.second_stage_lr
+    assert isinstance(stage2_scheduler, ReduceLROnPlateau)
+
+
+def test_stage_config_rejects_invalid_second_stage_dropout():
+    try:
+        TrainConfig.from_dict(
+            {
+                "data": {"input_tsv": "/tmp/mock.tsv"},
+                "checkpoint": {"pretrained_weights": "/tmp/weights.pt"},
+                "stage": {"second_stage_dropout": 1.0},
+            }
+        )
+    except ValueError as exc:
+        assert "stage.second_stage_dropout" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for invalid second_stage_dropout")
+
+
+def test_stage_config_rejects_unknown_second_stage_lr_scheduler():
+    try:
+        TrainConfig.from_dict(
+            {
+                "data": {"input_tsv": "/tmp/mock.tsv"},
+                "checkpoint": {"pretrained_weights": "/tmp/weights.pt"},
+                "stage": {"second_stage_lr_scheduler": "linear"},
+            }
+        )
+    except ValueError as exc:
+        assert "stage.second_stage_lr_scheduler" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for unknown second_stage_lr_scheduler")
+
+
 def test_run_training_stage_runs_validation_within_each_epoch_and_emits_callbacks(tmp_path: Path):
     model = _make_model()
     train_loader = _make_loader()
