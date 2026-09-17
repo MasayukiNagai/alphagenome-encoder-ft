@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -595,9 +596,26 @@ def run_two_stage_training(
     best_stage1_path = stage1_result["best_checkpoint_path"] or str(stage1_dir / "best.pt")
     load_checkpoint(best_stage1_path, model)
 
+    if config.stage.second_stage_dropout is not None:
+        model.head.dropout = config.stage.second_stage_dropout
+
     model.set_encoder_trainable(True)
     stage2_optimizer = stage2_optimizer_factory(model)
-    stage2_scheduler = stage2_scheduler_factory(stage2_optimizer) if stage2_scheduler_factory is not None else None
+    if stage2_scheduler_factory is not None:
+        stage2_scheduler = stage2_scheduler_factory(stage2_optimizer)
+    elif config.stage.second_stage_lr_scheduler is not None:
+        stage2_optim_config = replace(
+            config.optim,
+            lr_scheduler=config.stage.second_stage_lr_scheduler,
+            learning_rate=config.stage.second_stage_lr,
+        )
+        stage2_scheduler = create_scheduler(
+            stage2_optim_config, stage2_optimizer, config.stage.second_stage_epochs
+        )
+        if stage2_scheduler_step is None:
+            stage2_scheduler_step = scheduler_stepper(config.stage.second_stage_lr_scheduler)
+    else:
+        stage2_scheduler = None
     stage2_result = run_training_stage(
         model,
         train_loader,
