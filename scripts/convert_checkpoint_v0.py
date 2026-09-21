@@ -26,7 +26,7 @@ _MODE_PIECES = {
 }
 
 
-def convert_payload(checkpoint: dict[str, Any]) -> dict[str, Any]:
+def convert_payload(checkpoint: dict[str, Any], *, construct_mode: str | None = None) -> dict[str, Any]:
     if "construct" in checkpoint and "input_length" in checkpoint:
         raise ValueError("Checkpoint is already in the v1 format")
 
@@ -34,7 +34,18 @@ def convert_payload(checkpoint: dict[str, Any]) -> dict[str, Any]:
     config = checkpoint.get("config") or {}
     data_config = dict(config.get("data") or {})
 
-    mode = construct_config.get("construct_mode", data_config.get("construct_mode", "none"))
+    mode = construct_mode or construct_config.get("construct_mode") or data_config.get("construct_mode")
+    if mode is None:
+        # Some v0 checkpoints (e.g. the autotune reference runs) record the reporter pieces
+        # but not which of them were actually concatenated. Guessing would silently build a
+        # construct the model was never trained with, so ask instead.
+        available = sorted(k for k in ("left_adapter", "right_adapter", "promoter_seq", "barcode_seq") if construct_config.get(k))
+        raise ValueError(
+            "Checkpoint records no construct_mode, so the assembled layout is ambiguous; "
+            f"pass --construct_mode (one of: {', '.join(sorted(_MODE_PIECES))}). "
+            f"Pieces present: {', '.join(available) or 'none'}. "
+            f"sequence_length: {construct_config.get('sequence_length') or data_config.get('sequence_length')}"
+        )
     if mode not in _MODE_PIECES:
         raise ValueError(f"Unknown v0 construct_mode: {mode!r}")
     prefix_keys, suffix_keys = _MODE_PIECES[mode]
@@ -84,6 +95,13 @@ def main() -> None:
     parser.add_argument("input_path", type=str)
     parser.add_argument("output_path", type=str)
     parser.add_argument(
+        "--construct_mode",
+        type=str,
+        default=None,
+        choices=sorted(_MODE_PIECES),
+        help="Which pieces the v0 run concatenated, when the checkpoint does not record it",
+    )
+    parser.add_argument(
         "--input_length",
         type=int,
         default=None,
@@ -100,7 +118,7 @@ def main() -> None:
     if args.input_length is not None:
         checkpoint.setdefault("construct_config", {})["sequence_length"] = args.input_length
     try:
-        converted = convert_payload(checkpoint)
+        converted = convert_payload(checkpoint, construct_mode=args.construct_mode)
     except ValueError as exc:
         parser.error(str(exc))
 
