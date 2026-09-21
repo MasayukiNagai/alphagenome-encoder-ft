@@ -20,7 +20,7 @@ __all__ = [
     "create_dataloader",
     "Construct",
     "lentimpra_construct",
-    "lentimpra_full_construct",
+    "lentimpra_promoter_barcode_construct",
     "deepstarr_construct",
     "AlphaGenomeEncoderModel",
     "MPRAHead",
@@ -46,7 +46,12 @@ _MODULE_BY_NAME = {
     # alphagenome_encoder_ft.constructs rather than the top-level API: they are building
     # blocks for composing a custom layout, not part of the curated surface.
     **dict.fromkeys(
-        ["Construct", "lentimpra_construct", "lentimpra_full_construct", "deepstarr_construct"],
+        [
+            "Construct",
+            "lentimpra_construct",
+            "lentimpra_promoter_barcode_construct",
+            "deepstarr_construct",
+        ],
         "constructs",
     ),
     **dict.fromkeys(

@@ -91,12 +91,28 @@ prefix + insert + suffix = 10 bp, length=13  ->  pad  1 left, 2 right
 ### Presets
 
 ```python
-from alphagenome_encoder_ft import lentimpra_construct, lentimpra_full_construct, deepstarr_construct
+from alphagenome_encoder_ft import (
+    lentimpra_construct,
+    lentimpra_promoter_barcode_construct,
+    deepstarr_construct,
+)
 
-lentimpra_construct()       # insert + minP + barcode -> 281 bp (Agarwal TSVs: seq already has adapters)
-lentimpra_full_construct()  # adapters + insert + adapters + minP + barcode -> 281 bp (bare 200 bp insert)
-deepstarr_construct()       # STARR-seq adapters around the insert -> 256 bp
+lentimpra_construct()                     # the whole reporter around a bare 200 bp element
+lentimpra_promoter_barcode_construct()    # minus the adapters, for inserts that already carry them
+deepstarr_construct()                     # STARR-seq adapters around the insert -> 256 bp
 ```
+
+Both lentiMPRA presets describe the same 281 bp reporter; they differ in where the insert
+starts:
+
+| preset | insert it expects | what it adds |
+|---|---|---|
+| `lentimpra_construct()` | bare element, 200 bp | left adapter, right adapter, minP, barcode |
+| `lentimpra_promoter_barcode_construct()` | 230 bp with adapters inline | minP, barcode |
+
+The published Agarwal et al. 2025 TSVs are the second case, so their `seq` column needs the
+promoter-barcode preset. Passing those rows to `lentimpra_construct()` would add a second
+copy of the adapters and push the real element out of the window.
 
 The individual pieces live in `alphagenome_encoder_ft.constructs` rather than the top-level API, for composing a layout of your own, such as an ablation that drops the barcode:
 
@@ -132,6 +148,7 @@ saliency = x.grad                                      # (1, L, 4), aligned to t
 ```python
 from alphagenome_encoder_ft import MPRADataset, lentimpra_construct
 
+# inserts here are bare elements, so the full reporter preset applies
 ds = MPRADataset(inserts, targets, construct=lentimpra_construct(), reverse_complement=True)
 ```
 

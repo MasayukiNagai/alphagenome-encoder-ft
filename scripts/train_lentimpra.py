@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 from typing import Any
 
-from alphagenome_encoder_ft import LentiMPRADataset, lentimpra_construct
+from alphagenome_encoder_ft import LentiMPRADataset, lentimpra_promoter_barcode_construct
 from alphagenome_encoder_ft.cli import (
     add_construct_arguments,
     add_train_arguments,
@@ -34,7 +34,8 @@ def main() -> dict[str, Any]:
     parser = build_arg_parser()
     args = parser.parse_args()
     config = load_config(parser, args)
-    construct = resolve_construct(args, lentimpra_construct())
+    # Not lentimpra_construct(): the seq column already carries the adapters.
+    construct = resolve_construct(args, lentimpra_promoter_barcode_construct())
 
     def make_dataset(split: str) -> LentiMPRADataset:
         return LentiMPRADataset(

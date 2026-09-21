@@ -8,10 +8,13 @@ import torch
 from alphagenome_pytorch.utils.sequence import sequence_to_onehot
 
 from alphagenome_encoder_ft.constructs import (
+    LENTIMPRA_BARCODE,
+    LENTIMPRA_LEFT_ADAPTER,
+    LENTIMPRA_RIGHT_ADAPTER,
     Construct,
     deepstarr_construct,
     lentimpra_construct,
-    lentimpra_full_construct,
+    lentimpra_promoter_barcode_construct,
 )
 
 
@@ -126,18 +129,43 @@ def test_to_dict_from_dict_roundtrip():
     assert Construct.from_dict({}) == Construct()
 
 
-def test_presets_have_the_documented_layout():
-    lenti = lentimpra_construct()
-    assert lenti.prefix == ""
-    assert lenti.length == 281
-    # a 230 bp lentiMPRA seq (adapters inline) + minP + barcode is exactly 281 bp.
-    assert len(lenti.assemble_sequence("A" * 230)) == 281
-    assert "N" not in lenti.assemble_sequence("A" * 230)
+def test_lentimpra_construct_wraps_a_bare_element_in_the_whole_reporter():
+    construct = lentimpra_construct()
+    assembled = construct.assemble_sequence("A" * 200)
 
-    full = lentimpra_full_construct()
-    assert len(full.assemble_sequence("A" * 200)) == 281
-    assert "N" not in full.assemble_sequence("A" * 200)
+    assert construct.length == 281
+    # 15 + 200 + 15 + 36 + 15 = 281, so nothing is trimmed or padded.
+    assert len(assembled) == 281
+    assert "N" not in assembled
+    assert assembled.startswith(LENTIMPRA_LEFT_ADAPTER)
+    assert assembled.endswith(LENTIMPRA_BARCODE)
 
-    deepstarr = deepstarr_construct()
-    assert deepstarr.length == 256
-    assert len(deepstarr.assemble_sequence("A" * 249)) == 256
+
+def test_promoter_barcode_construct_adds_no_adapters():
+    construct = lentimpra_promoter_barcode_construct()
+    seq = "A" * 230  # an Agarwal row: adapters already inline
+    assembled = construct.assemble_sequence(seq)
+
+    assert construct.prefix == ""
+    assert construct.length == 281
+    # 230 + 36 + 15 = 281.
+    assert len(assembled) == 281
+    assert "N" not in assembled
+    assert assembled.startswith(seq)
+
+
+def test_the_two_lentimpra_presets_agree_once_the_adapters_are_inline():
+    """Wrapping a bare element must equal appending to the same element with adapters."""
+
+    element = "ACGT" * 50  # 200 bp
+    with_adapters = LENTIMPRA_LEFT_ADAPTER + element + LENTIMPRA_RIGHT_ADAPTER
+
+    assert lentimpra_construct().assemble_sequence(element) == (
+        lentimpra_promoter_barcode_construct().assemble_sequence(with_adapters)
+    )
+
+
+def test_deepstarr_construct_layout():
+    construct = deepstarr_construct()
+    assert construct.length == 256
+    assert len(construct.assemble_sequence("A" * 249)) == 256

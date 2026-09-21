@@ -176,23 +176,29 @@ class Construct:
 
 
 def lentimpra_construct() -> Construct:
-    """lentiMPRA as distributed by Agarwal et al. 2025.
+    """The whole lentiMPRA reporter around a bare 200 bp element.
 
-    The ``seq`` column of those TSVs is 230 bp and already carries the 15 bp adapters, so the
-    insert is that 230 bp sequence and only minP + barcode are appended: 281 bp total.
+    ``left adapter + insert + right adapter + minP + barcode``, 281 bp in total. Use this
+    when the insert is the biological element alone, which is the usual case when designing
+    sequences rather than reading a published table.
     """
-
-    return Construct(suffix=LENTIMPRA_PROMOTER + LENTIMPRA_BARCODE, length=281)
-
-
-def lentimpra_full_construct() -> Construct:
-    """lentiMPRA for a bare 200 bp insert: adapters + insert + adapters + minP + barcode = 281 bp."""
 
     return Construct(
         prefix=LENTIMPRA_LEFT_ADAPTER,
         suffix=LENTIMPRA_RIGHT_ADAPTER + LENTIMPRA_PROMOTER + LENTIMPRA_BARCODE,
         length=281,
     )
+
+
+def lentimpra_promoter_barcode_construct() -> Construct:
+    """The lentiMPRA reporter minus the adapters, for inserts that already carry them.
+
+    The ``seq`` column of the Agarwal et al. 2025 TSVs is 230 bp with the 15 bp adapters
+    inline, so only minP + barcode are appended, again reaching 281 bp. Using
+    :func:`lentimpra_construct` on those rows would add a second copy of the adapters.
+    """
+
+    return Construct(suffix=LENTIMPRA_PROMOTER + LENTIMPRA_BARCODE, length=281)
 
 
 def deepstarr_construct() -> Construct:
