@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from alphagenome_encoder_ft.config import TrainConfig
+
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "convert_checkpoint_v0.py"
 _spec = importlib.util.spec_from_file_location("convert_checkpoint_v0", SCRIPT)
 convert_module = importlib.util.module_from_spec(_spec)
@@ -76,6 +78,22 @@ def test_the_removed_v1_data_fields_are_stripped_from_the_config():
 
     assert "input_tsv" not in data and "promoter_seq" not in data and "sequence_length" not in data
     assert data["batch_size"] == 32  # fields v1 still has survive
+
+
+def test_pipeline_specific_config_sections_are_quarantined_not_dropped():
+    """TrainConfig.from_dict rejects unknown sections; the reference checkpoints have four."""
+
+    payload = _payload(construct_mode="promoter_barcode")
+    payload["config"].update({"cell_type": "K562", "origin": "autotune", "source_ckpt": "x.pt"})
+
+    config = convert_payload(payload)["config"]
+
+    # the converted payload loads
+    TrainConfig.from_dict(config)
+    # and the provenance survives under a key from_dict ignores
+    assert config["_v0_config_sections"]["cell_type"] == "K562"
+    assert config["_v0_config_sections"]["origin"] == "autotune"
+    assert "cell_type" not in config
 
 
 def test_an_unknown_mode_is_rejected():

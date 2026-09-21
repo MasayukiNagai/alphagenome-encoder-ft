@@ -85,7 +85,18 @@ def convert_payload(checkpoint: dict[str, Any], *, construct_mode: str | None = 
         "barcode_seq",
     ):
         data_config.pop(key, None)
-    converted["config"] = {**config, "data": data_config}
+
+    # TrainConfig.from_dict rejects sections it does not know, and pipeline-specific ones
+    # (cell_type, origin, source_ckpt, ...) are common in v0 payloads. Keep them under an
+    # underscore key, which from_dict ignores, so provenance survives without breaking the
+    # schema.
+    known = {"data", "head", "optim", "stage", "checkpoint", "logging", "runtime"}
+    kept = {key: value for key, value in config.items() if key in known or str(key).startswith("_")}
+    extra = {key: value for key, value in config.items() if key not in known and not str(key).startswith("_")}
+    if extra:
+        kept["_v0_config_sections"] = extra
+
+    converted["config"] = {**kept, "data": data_config}
     converted["converted_from"] = "v0"
     return converted
 
