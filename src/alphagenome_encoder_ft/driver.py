@@ -554,8 +554,17 @@ def save_predictions(
             )
 
 
-def save_scatter_plot(path: Path, y_true: np.ndarray, y_pred: np.ndarray, metrics: dict[str, Any]) -> None:
-    import matplotlib.pyplot as plt
+def save_scatter_plot(path: Path, y_true: np.ndarray, y_pred: np.ndarray, metrics: dict[str, Any]) -> bool:
+    """Write a y vs y_pred scatter. Returns False (with a warning) if matplotlib is absent."""
+
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("matplotlib is not installed; skipping the scatter plot")
+        return False
 
     y_true = np.asarray(y_true).reshape(-1)
     y_pred = np.asarray(y_pred).reshape(-1)
@@ -588,6 +597,7 @@ def save_scatter_plot(path: Path, y_true: np.ndarray, y_pred: np.ndarray, metric
     fig.tight_layout()
     fig.savefig(path, dpi=200)
     plt.close(fig)
+    return True
 
 
 def evaluate_checkpoint(
