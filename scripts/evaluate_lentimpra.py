@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from alphagenome_encoder_ft import Construct, LentiMPRADataset
-from alphagenome_encoder_ft.driver import (
+from alphagenome_encoder_ft.cli import (
     add_evaluate_arguments,
     evaluate_checkpoint,
     resolve_input_tsv,

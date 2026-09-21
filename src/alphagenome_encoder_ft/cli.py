@@ -1,8 +1,15 @@
-"""Shared plumbing for per-assay train and evaluate scripts.
+"""Command-line scaffolding for per-assay train and evaluate scripts.
 
-Each assay gets its own short driver script that picks the dataset reader and the
-``Construct``; everything the drivers have in common (CLI overrides for ``TrainConfig``,
-the two-stage loop, checkpoint evaluation, metrics) lives here.
+This is the layer between a shell command and the library. It turns argparse namespaces
+and JSON config files into a :class:`TrainConfig` and a :class:`Construct`, lays out a run
+directory (``config.json``, ``run.json``, ``history.json``, per-stage checkpoints), wires up
+wandb, and writes metrics, predictions and a plot. The training itself is
+:mod:`alphagenome_encoder_ft.train`, which knows nothing about any of that; the statistics
+are :mod:`alphagenome_encoder_ft.metrics`.
+
+Each assay's script stays short because only two things differ between assays: which
+dataset reader to use, and which ``Construct`` to build. Nothing here is needed to use the
+package as a library.
 """
 
 from __future__ import annotations
@@ -10,7 +17,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -22,6 +28,7 @@ from torch.utils.data import Dataset
 from .config import TrainConfig, load_train_config, merge_train_config, parse_hidden_sizes
 from .constructs import Construct
 from .data import create_dataloader
+from .metrics import regression_metrics
 from .model import AlphaGenomeEncoderModel
 from .train import (
     create_optimizer,
@@ -431,73 +438,6 @@ def resolve_input_tsv(parser: argparse.ArgumentParser, args: argparse.Namespace,
     return Path(input_tsv)
 
 
-def _average_ranks(values: np.ndarray) -> np.ndarray:
-    order = np.argsort(values, kind="mergesort")
-    sorted_values = values[order]
-    ranks = np.empty(values.shape[0], dtype=np.float64)
-    start = 0
-    while start < sorted_values.shape[0]:
-        end = start + 1
-        while end < sorted_values.shape[0] and sorted_values[end] == sorted_values[start]:
-            end += 1
-        ranks[order[start:end]] = 0.5 * (start + end - 1) + 1.0
-        start = end
-    return ranks
-
-
-def compute_pearsonr(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    y_true = np.asarray(y_true, dtype=np.float64).reshape(-1)
-    y_pred = np.asarray(y_pred, dtype=np.float64).reshape(-1)
-    if y_true.shape != y_pred.shape:
-        raise ValueError(f"Shape mismatch: {y_true.shape} vs {y_pred.shape}")
-    if y_true.size < 2:
-        return float("nan")
-    true_centered = y_true - y_true.mean()
-    pred_centered = y_pred - y_pred.mean()
-    denom = np.linalg.norm(true_centered) * np.linalg.norm(pred_centered)
-    if denom == 0.0:
-        return float("nan")
-    return float(np.dot(true_centered, pred_centered) / denom)
-
-
-def compute_spearmanr(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    y_true = np.asarray(y_true, dtype=np.float64).reshape(-1)
-    y_pred = np.asarray(y_pred, dtype=np.float64).reshape(-1)
-    if y_true.size < 2:
-        return float("nan")
-    return compute_pearsonr(_average_ranks(y_true), _average_ranks(y_pred))
-
-
-def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, Any]:
-    """Regression metrics; for ``(N, K)`` targets also one block per track."""
-
-    y_true = np.asarray(y_true, dtype=np.float64)
-    y_pred = np.asarray(y_pred, dtype=np.float64)
-    residual = y_pred - y_true
-    mse = float(np.mean(np.square(residual))) if y_true.size else float("nan")
-    metrics: dict[str, Any] = {
-        "n_samples": int(y_true.shape[0]),
-        "mse": mse,
-        "rmse": float(math.sqrt(mse)) if not math.isnan(mse) else float("nan"),
-        "mae": float(np.mean(np.abs(residual))) if y_true.size else float("nan"),
-    }
-    if y_true.ndim == 1 or y_true.shape[1] == 1:
-        metrics["pearsonr"] = compute_pearsonr(y_true, y_pred)
-        metrics["spearmanr"] = compute_spearmanr(y_true, y_pred)
-    else:
-        per_track = [
-            {
-                "pearsonr": compute_pearsonr(y_true[:, k], y_pred[:, k]),
-                "spearmanr": compute_spearmanr(y_true[:, k], y_pred[:, k]),
-            }
-            for k in range(y_true.shape[1])
-        ]
-        metrics["pearsonr"] = float(np.mean([t["pearsonr"] for t in per_track]))
-        metrics["spearmanr"] = float(np.mean([t["spearmanr"] for t in per_track]))
-        metrics["per_track"] = per_track
-    return metrics
-
-
 @torch.no_grad()
 def collect_predictions(
     model: AlphaGenomeEncoderModel,
@@ -643,7 +583,7 @@ def evaluate_checkpoint(
     )
     y_true, y_pred = collect_predictions(model, test_loader, device=resolved_device, use_amp=use_amp)
 
-    metrics = compute_metrics(y_true, y_pred)
+    metrics = regression_metrics(y_true, y_pred)
     metrics.update(
         {
             "checkpoint_path": str(checkpoint_path),

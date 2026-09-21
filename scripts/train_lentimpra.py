@@ -12,7 +12,7 @@ import argparse
 from typing import Any
 
 from alphagenome_encoder_ft import LentiMPRADataset, lentimpra_construct
-from alphagenome_encoder_ft.driver import (
+from alphagenome_encoder_ft.cli import (
     add_construct_arguments,
     add_train_arguments,
     dataset_kwargs,

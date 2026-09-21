@@ -160,6 +160,12 @@ python scripts/evaluate_lentimpra.py --checkpoint_path results/mpra_K562/stage2/
 - Input TSV for lentiMPRA: https://github.com/autosome-ru/human_legnet
 - Pretrained weights: https://huggingface.co/gtca/alphagenome_pytorch
 
+`cli.py` holds that scaffolding: argparse, config files, run-directory layout and wandb.
+It exists so a new assay's script is short, and it is installed so scripts outside this
+repository can use it too. Nothing in it is needed to use the package as a library. The
+training itself is `train.py`, which takes a model and data loaders you built and knows
+nothing about config files or run directories, and the statistics are `metrics.py`.
+
 ## Layout
 
 ```text
@@ -168,9 +174,10 @@ src/alphagenome_encoder_ft/
 ├── data.py       # MPRADataset base + per-assay readers
 ├── heads.py      # MPRAHead, DeepSTARRHead
 ├── model.py      # AlphaGenomeEncoderModel (backbone + head + construct)
-├── train.py      # training loop, checkpointing
+├── train.py      # epoch loop, evaluation, checkpointing, two-stage schedule
+├── metrics.py    # Pearson, Spearman, the evaluation summary
 ├── config.py     # TrainConfig and friends
-└── driver.py     # shared CLI/train/evaluate plumbing for the scripts
+└── cli.py        # argparse/config/run-directory scaffolding for the scripts
 scripts/
 ├── train_lentimpra.py / evaluate_lentimpra.py
 ├── train_deepstarr.py / evaluate_deepstarr.py

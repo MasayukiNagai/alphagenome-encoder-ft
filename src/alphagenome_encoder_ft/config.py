@@ -44,7 +44,7 @@ def _deep_merge(base: dict[str, Any], overrides: Mapping[str, Any]) -> dict[str,
 
 @dataclass
 class DataConfig:
-    """Loader and augmentation settings. What the data *is* (file, construct) belongs to the driver."""
+    """Loader and augmentation settings. What the data *is* (file, construct) belongs to the script."""
 
     batch_size: int = 32
     reverse_complement: bool = False
