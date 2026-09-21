@@ -171,11 +171,9 @@ LENTIMPRA_PROMOTER = "TCCATTATATACCCTCTAGTGTCGGTTCACGCAATG"
 LENTIMPRA_BARCODE = "AGAGACTGAGGCCAC"
 
 def lentimpra_construct() -> Construct:
-    """The whole lentiMPRA reporter around a bare 200 bp element.
+    """The lentiMPRA reporter around a 200 bp element.
 
-    ``left adapter + insert + right adapter + minP + barcode``, 281 bp in total. Use this
-    when the insert is the biological element alone, which is the usual case when designing
-    sequences rather than reading a published table.
+    ``left adapter + element + right adapter + minP + barcode``, 281 bp in total.
     """
 
     return Construct(
@@ -183,17 +181,6 @@ def lentimpra_construct() -> Construct:
         suffix=LENTIMPRA_RIGHT_ADAPTER + LENTIMPRA_PROMOTER + LENTIMPRA_BARCODE,
         length=281,
     )
-
-
-def lentimpra_promoter_barcode_construct() -> Construct:
-    """The lentiMPRA reporter minus the adapters, for inserts that already carry them.
-
-    The ``seq`` column of the Agarwal et al. 2025 TSVs is 230 bp with the 15 bp adapters
-    inline, so only minP + barcode are appended, again reaching 281 bp. Using
-    :func:`lentimpra_construct` on those rows would add a second copy of the adapters.
-    """
-
-    return Construct(suffix=LENTIMPRA_PROMOTER + LENTIMPRA_BARCODE, length=281)
 
 
 # Drosophila DeepSTARR library adapters (de Almeida et al. 2022).

@@ -91,44 +91,20 @@ prefix + insert + suffix = 10 bp, length=13  ->  pad  1 left, 2 right
 ### Presets
 
 ```python
-from alphagenome_encoder_ft import (
-    lentimpra_construct,
-    lentimpra_promoter_barcode_construct,
-    deepstarr_construct,
-)
+from alphagenome_encoder_ft import lentimpra_construct, deepstarr_construct
 
-lentimpra_construct()                     # the whole reporter around a bare 200 bp element
-lentimpra_promoter_barcode_construct()    # minus the adapters, for inserts that already carry them
-deepstarr_construct()                     # STARR-seq adapters around the insert -> 256 bp
+lentimpra_construct()   # adapters + element + minP + barcode -> 281 bp
+deepstarr_construct()   # STARR-seq adapters around the insert -> 256 bp
 ```
 
-Both lentiMPRA presets describe the same 281 bp reporter; they differ in where the insert
-starts:
-
-| preset | insert it expects | what it adds |
+| preset | insert | model input |
 |---|---|---|
-| `lentimpra_construct()` | bare element, 200 bp | left adapter, right adapter, minP, barcode |
-| `lentimpra_promoter_barcode_construct()` | 230 bp with adapters inline | minP, barcode |
+| `lentimpra_construct()` | 200 bp element | 281 bp |
+| `deepstarr_construct()` | ~249 bp insert | 256 bp |
 
-The published Agarwal et al. 2025 TSVs are the second case: their `seq` column is 230 bp
-with the adapters inline. Two ways to handle that, and they produce byte-identical model
-input:
-
-```python
-# take the adapters off, so the insert is the bare element (what the drivers do)
-LentiMPRADataset(tsv, strip_adapters=True, construct=lentimpra_construct())
-
-# or leave seq alone and add only what is missing
-LentiMPRADataset(tsv, construct=lentimpra_promoter_barcode_construct())
-```
-
-Prefer the first. The insert is then the 200 bp element, so `predict_inserts` takes the
-sequence you designed with no adapter bookkeeping, and attribution returns one gradient row
-per element base instead of 30 constant adapter rows you have to remember to ignore.
-
-`strip_adapters` verifies rather than assumes: a row that does not carry the expected
-flanks raises and names itself. It defaults to off, because this reader is also used for
-files with the same columns but no adapters.
+`LentiMPRADataset` takes the cloning adapters off the published `seq` column, so the insert
+it yields is the element this preset expects. A row whose flanks are not the expected ones
+raises and names itself.
 
 The individual pieces live in `alphagenome_encoder_ft.constructs` rather than the top-level API, for composing a layout of your own, such as an ablation that drops the barcode:
 
@@ -164,13 +140,12 @@ saliency = x.grad                                      # (1, L, 4), aligned to t
 ```python
 from alphagenome_encoder_ft import MPRADataset, lentimpra_construct
 
-# inserts here are bare elements, so the full reporter preset applies
-ds = MPRADataset(inserts, targets, construct=lentimpra_construct(), reverse_complement=True)
+ds = MPRADataset(elements, targets, construct=lentimpra_construct(), reverse_complement=True)
 ```
 
 Readers subclass it and parse one assay's layout:
 
-- `LentiMPRADataset(input_tsv, split=...)` — `seq` / `mean_value` / `fold` / `rev`; keeps `rev == 0` and selects folds per split.
+- `LentiMPRADataset(input_tsv, split=...)` — `seq` / `mean_value` / `fold` / `rev`; keeps `rev == 0`, selects folds per split, and yields the 200 bp element as the insert.
 - `DeepSTARRDataset(input_tsv, split=...)` — a split column plus two log2 targets.
 
 Reverse complement applies to the whole assembled sequence, matching a double-stranded plasmid.

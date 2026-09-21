@@ -14,7 +14,6 @@ from alphagenome_encoder_ft.constructs import (
     Construct,
     deepstarr_construct,
     lentimpra_construct,
-    lentimpra_promoter_barcode_construct,
 )
 
 
@@ -141,28 +140,13 @@ def test_lentimpra_construct_wraps_a_bare_element_in_the_whole_reporter():
     assert assembled.endswith(LENTIMPRA_BARCODE)
 
 
-def test_promoter_barcode_construct_adds_no_adapters():
-    construct = lentimpra_promoter_barcode_construct()
-    seq = "A" * 230  # an Agarwal row: adapters already inline
-    assembled = construct.assemble_sequence(seq)
+def test_lentimpra_construct_places_the_element_where_the_published_seq_has_it():
+    """seq is adapter + element + adapter, so the first 230 bp of the reporter is that seq."""
 
-    assert construct.prefix == ""
-    assert construct.length == 281
-    # 230 + 36 + 15 = 281.
-    assert len(assembled) == 281
-    assert "N" not in assembled
-    assert assembled.startswith(seq)
+    element = "ACGT" * 50
+    assembled = lentimpra_construct().assemble_sequence(element)
 
-
-def test_the_two_lentimpra_presets_agree_once_the_adapters_are_inline():
-    """Wrapping a bare element must equal appending to the same element with adapters."""
-
-    element = "ACGT" * 50  # 200 bp
-    with_adapters = LENTIMPRA_LEFT_ADAPTER + element + LENTIMPRA_RIGHT_ADAPTER
-
-    assert lentimpra_construct().assemble_sequence(element) == (
-        lentimpra_promoter_barcode_construct().assemble_sequence(with_adapters)
-    )
+    assert assembled[:230] == LENTIMPRA_LEFT_ADAPTER + element + LENTIMPRA_RIGHT_ADAPTER
 
 
 def test_deepstarr_construct_layout():

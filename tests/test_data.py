@@ -15,7 +15,6 @@ from alphagenome_encoder_ft.constructs import (
     LENTIMPRA_RIGHT_ADAPTER,
     Construct,
     lentimpra_construct,
-    lentimpra_promoter_barcode_construct,
 )
 from alphagenome_encoder_ft.data import (
     DeepSTARRDataset,
@@ -141,16 +140,22 @@ def test_validation_of_numeric_arguments():
 # -------------------------
 
 
+def _published(element: str) -> str:
+    """A seq column value: the element between the two cloning adapters."""
+
+    return LENTIMPRA_LEFT_ADAPTER + element + LENTIMPRA_RIGHT_ADAPTER
+
+
 @pytest.fixture
 def lentimpra_tsv(tmp_path: Path) -> Path:
     return _write_tsv(
         tmp_path / "K562.tsv",
         ["seq", "rev", "fold", "mean_value"],
         [
-            {"seq": "AC", "rev": 0, "fold": 2, "mean_value": 1.0},
-            {"seq": "GT", "rev": 0, "fold": 1, "mean_value": 2.0},
-            {"seq": "AA", "rev": 1, "fold": 10, "mean_value": 3.0},
-            {"seq": "CC", "rev": 0, "fold": 10, "mean_value": 4.0},
+            {"seq": _published("AC"), "rev": 0, "fold": 2, "mean_value": 1.0},
+            {"seq": _published("GT"), "rev": 0, "fold": 1, "mean_value": 2.0},
+            {"seq": _published("AA"), "rev": 1, "fold": 10, "mean_value": 3.0},
+            {"seq": _published("CC"), "rev": 0, "fold": 10, "mean_value": 4.0},
         ],
     )
 
@@ -243,45 +248,38 @@ def _reverse_complement(sequence: str) -> str:
     return sequence[::-1].translate(str.maketrans("ACGT", "TGCA"))
 
 
-def test_strip_adapters_leaves_the_bare_element(adapter_tsv: Path):
-    ds = LentiMPRADataset(adapter_tsv, split="test", strip_adapters=True)
+def test_the_insert_is_the_element(adapter_tsv: Path):
+    ds = LentiMPRADataset(adapter_tsv, split="test")
     assert ds.inserts == [ELEMENT]
     assert len(ds.inserts[0]) == 200
 
 
-def test_not_stripping_keeps_the_published_sequence(adapter_tsv: Path):
-    ds = LentiMPRADataset(adapter_tsv, split="test")  # default is off
-    assert len(ds.inserts[0]) == 230
-    assert ds.inserts[0].startswith(LENTIMPRA_LEFT_ADAPTER)
+def test_the_reverse_complement_rows_are_dropped_before_stripping(adapter_tsv: Path):
+    """They carry each adapter's reverse complement at the opposite end."""
+
+    assert len(LentiMPRADataset(adapter_tsv, split="test")) == 1
 
 
-def test_stripping_runs_after_the_rev_filter(adapter_tsv: Path):
-    """The rev == 1 rows carry reverse-complemented adapters; they must be gone first."""
+def test_the_construct_rebuilds_the_published_sequence(adapter_tsv: Path):
+    ds = LentiMPRADataset(adapter_tsv, split="test", construct=lentimpra_construct())
+    onehot = ds[0][0]
 
-    ds = LentiMPRADataset(adapter_tsv, split="test", strip_adapters=True)
-    assert len(ds) == 1  # the reverse-complement partner was dropped, not stripped
+    assert onehot.shape == (281, 4)
+    # the first 230 bp are the seq column as published
+    assert _decode(onehot)[:230] == LENTIMPRA_LEFT_ADAPTER + ELEMENT + LENTIMPRA_RIGHT_ADAPTER
 
 
-def test_stripping_and_the_full_construct_rebuild_the_same_model_input(adapter_tsv: Path):
-    """The whole point: where the boundary sits must not change what the model sees."""
-
-    stripped = LentiMPRADataset(
-        adapter_tsv, split="test", strip_adapters=True, construct=lentimpra_construct()
+def test_a_file_without_adapters_fails_loudly(tmp_path: Path):
+    path = _write_tsv(
+        tmp_path / "bare.tsv",
+        ["seq", "rev", "fold", "mean_value"],
+        [{"seq": "AC", "rev": 0, "fold": 10, "mean_value": 1.0}],
     )
-    inline = LentiMPRADataset(
-        adapter_tsv, split="test", construct=lentimpra_promoter_barcode_construct()
-    )
-
-    torch.testing.assert_close(stripped[0][0], inline[0][0])
-    assert stripped[0][0].shape == (281, 4)
-
-
-def test_stripping_a_file_without_adapters_fails_loudly(lentimpra_tsv: Path):
     with pytest.raises(ValueError, match="too short to carry"):
-        LentiMPRADataset(lentimpra_tsv, split="test", strip_adapters=True)
+        LentiMPRADataset(path, split="test")
 
 
-def test_stripping_names_the_row_whose_flanks_are_wrong(tmp_path: Path):
+def test_a_row_with_wrong_flanks_is_named(tmp_path: Path):
     path = _write_tsv(
         tmp_path / "mixed.tsv",
         ["seq_id", "seq", "rev", "fold", "mean_value"],
@@ -296,7 +294,7 @@ def test_stripping_names_the_row_whose_flanks_are_wrong(tmp_path: Path):
         ],
     )
     with pytest.raises(ValueError, match="oddball"):
-        LentiMPRADataset(path, split="test", strip_adapters=True)
+        LentiMPRADataset(path, split="test")
 
 
 def test_strip_flanks_is_reusable_on_plain_sequences():

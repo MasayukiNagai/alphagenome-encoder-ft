@@ -25,12 +25,6 @@ from alphagenome_encoder_ft.cli import (
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Fine-tune an AlphaGenome encoder on lentiMPRA")
     parser.add_argument("--input_tsv", type=str, required=True)
-    parser.add_argument(
-        "--strip_adapters",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Take the 15 bp adapters off seq so the insert is the bare element (default)",
-    )
     add_train_arguments(parser)
     add_construct_arguments(parser)
     return parser
@@ -40,9 +34,6 @@ def main() -> dict[str, Any]:
     parser = build_arg_parser()
     args = parser.parse_args()
     config = load_config(parser, args)
-    # These two go together: the reader takes the 15 bp adapters off the published seq
-    # column, and the construct puts them back. The insert is then the bare 200 bp element,
-    # which is what a designed sequence looks like and what attribution should cover.
     construct = resolve_construct(args, lentimpra_construct())
 
     def make_dataset(split: str) -> LentiMPRADataset:
@@ -50,7 +41,6 @@ def main() -> dict[str, Any]:
             args.input_tsv,
             split=split,
             construct=construct,
-            strip_adapters=args.strip_adapters,
             **dataset_kwargs(config, augment=split == "train"),
         )
 
@@ -58,11 +48,7 @@ def main() -> dict[str, Any]:
         config,
         construct=construct,
         make_dataset=make_dataset,
-        metadata={
-            "dataset": "lentimpra",
-            "input_tsv": str(args.input_tsv),
-            "strip_adapters": args.strip_adapters,
-        },
+        metadata={"dataset": "lentimpra", "input_tsv": str(args.input_tsv)},
         show_progress=args.show_progress,
     )
 
