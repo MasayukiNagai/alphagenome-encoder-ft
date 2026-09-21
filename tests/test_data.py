@@ -1,196 +1,203 @@
+"""Dataset base (construct + augmentation) and the per-assay readers."""
+
 from __future__ import annotations
 
 import csv
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
-
 from alphagenome_pytorch.utils.sequence import onehot_to_sequence
 
-from alphagenome_encoder_ft.constructs import ConstructSpec
-from alphagenome_encoder_ft.data import LentiMPRADataset
+from alphagenome_encoder_ft.constructs import Construct
+from alphagenome_encoder_ft.data import DeepSTARRDataset, LentiMPRADataset, MPRADataset
 
 
-def _write_dataset(path: Path) -> None:
-    with open(path / "HepG2.tsv", "w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["seq", "rev", "fold", "mean_value"], delimiter="\t")
+def _decode(item: torch.Tensor) -> str:
+    return onehot_to_sequence(item.numpy())
+
+
+def _write_tsv(path: Path, fieldnames: list[str], rows: list[dict]) -> Path:
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
         writer.writeheader()
-        writer.writerows(
-            [
-                {"seq": "AC", "rev": 0, "fold": 2, "mean_value": 1.0},
-                {"seq": "GT", "rev": 0, "fold": 1, "mean_value": 2.0},
-                {"seq": "AA", "rev": 1, "fold": 10, "mean_value": 3.0},
-                {"seq": "CC", "rev": 0, "fold": 10, "mean_value": 4.0},
-            ]
-        )
+        writer.writerows(rows)
+    return path
 
 
-def test_dataset_filters_split_and_rev(tmp_path: Path):
-    _write_dataset(tmp_path)
-    input_tsv = tmp_path / "HepG2.tsv"
-    spec = ConstructSpec.lentimpra_default()
+# -------------------------
+# Base
+# -------------------------
 
-    train_ds = LentiMPRADataset(input_tsv, split="train", construct_spec=spec)
-    val_ds = LentiMPRADataset(input_tsv, split="val", construct_spec=spec)
-    test_ds = LentiMPRADataset(input_tsv, split="test", construct_spec=spec)
 
-    assert len(train_ds) == 1
-    assert len(val_ds) == 1
+def test_base_applies_the_construct():
+    # A + CC + GT is 5 bases; padding to 6 adds the odd base on the suffix side.
+    ds = MPRADataset(["cc"], [1.0], construct=Construct(prefix="A", suffix="GT", length=6))
+    onehot, target = ds[0]
+    assert _decode(onehot) == "ACCGTN"
+    assert onehot.shape == (6, 4)
+    assert target.item() == pytest.approx(1.0)
+
+
+def test_base_passes_sequences_through_without_a_construct():
+    ds = MPRADataset(["acgt"], [2.0])
+    assert _decode(ds[0][0]) == "ACGT"
+
+
+def test_base_supports_multi_output_targets():
+    ds = MPRADataset(["AC", "GT"], [[1.0, 2.0], [3.0, 4.0]])
+    assert ds[1][1].shape == (2,)
+    torch.testing.assert_close(ds[1][1], torch.tensor([3.0, 4.0]))
+
+
+def test_base_rejects_mismatched_targets():
+    with pytest.raises(ValueError, match="targets has"):
+        MPRADataset(["AC", "GT"], [1.0])
+
+
+def test_random_shift_requires_a_construct_length():
+    with pytest.raises(ValueError, match="random_shift requires"):
+        MPRADataset(["AC"], [1.0], random_shift=True)
+    with pytest.raises(ValueError, match="random_shift requires"):
+        MPRADataset(["AC"], [1.0], construct=Construct(prefix="A"), random_shift=True)
+
+
+def test_jitter_slides_the_window_and_keeps_the_length():
+    construct = Construct(prefix="A" * 10, suffix="G" * 10, length=20)
+    ds = MPRADataset(
+        ["C" * 4] * 50,
+        [0.0] * 50,
+        construct=construct,
+        random_shift=True,
+        shift_prob=1.0,
+        max_shift=5,
+        seed=0,
+    )
+    sequences = {_decode(ds[i][0]) for i in range(len(ds))}
+    assert all(len(seq) == 20 for seq in sequences)
+    # With shift_prob=1 and max_shift=5 the window lands in several distinct places.
+    assert len(sequences) > 1
+    # Every window still contains part of the insert; none is pure flank.
+    assert all("C" in seq for seq in sequences)
+
+
+def test_no_jitter_is_deterministic():
+    # assembled = AAACCCCGGG (10) windowed to 8 -> drop 1 left, 1 right.
+    ds = MPRADataset(["CCCC"] * 5, [0.0] * 5, construct=Construct(prefix="AAA", suffix="GGG", length=8))
+    assert {_decode(ds[i][0]) for i in range(len(ds))} == {"AACCCCGG"}
+
+
+def test_reverse_complement_applies_to_the_whole_assembled_sequence():
+    construct = Construct(prefix="AA", suffix="GG", length=8)
+    ds = MPRADataset(
+        ["CCCC"] * 20,
+        [0.0] * 20,
+        construct=construct,
+        reverse_complement=True,
+        rc_prob=1.0,
+        seed=0,
+    )
+    # forward is AACCCCGG; its reverse complement is CCGGGGTT.
+    assert {_decode(ds[i][0]) for i in range(len(ds))} == {"CCGGGGTT"}
+
+
+def test_subset_frac_samples_rows_and_keeps_targets_aligned():
+    inserts = ["AA", "AC", "AG", "AT", "CA", "CC", "CG", "CT", "GA", "GC"]
+    ds = MPRADataset(inserts, [float(i) for i in range(len(inserts))], subset_frac=0.5, seed=1)
+
+    assert len(ds) == 5
+    for index in range(len(ds)):
+        insert = _decode(ds[index][0])
+        assert insert == ds.inserts[index]
+        # each sampled row keeps the target it had before sampling
+        assert ds[index][1].item() == pytest.approx(float(inserts.index(insert)))
+
+
+def test_validation_of_numeric_arguments():
+    with pytest.raises(ValueError, match="subset_frac"):
+        MPRADataset(["AC"], [1.0], subset_frac=0.0)
+    with pytest.raises(ValueError, match="rc_prob"):
+        MPRADataset(["AC"], [1.0], rc_prob=1.5)
+    with pytest.raises(ValueError, match="shift_prob"):
+        MPRADataset(["AC"], [1.0], shift_prob=-0.1)
+    with pytest.raises(ValueError, match="max_shift"):
+        MPRADataset(["AC"], [1.0], max_shift=-1)
+
+
+# -------------------------
+# Readers
+# -------------------------
+
+
+@pytest.fixture
+def lentimpra_tsv(tmp_path: Path) -> Path:
+    return _write_tsv(
+        tmp_path / "K562.tsv",
+        ["seq", "rev", "fold", "mean_value"],
+        [
+            {"seq": "AC", "rev": 0, "fold": 2, "mean_value": 1.0},
+            {"seq": "GT", "rev": 0, "fold": 1, "mean_value": 2.0},
+            {"seq": "AA", "rev": 1, "fold": 10, "mean_value": 3.0},
+            {"seq": "CC", "rev": 0, "fold": 10, "mean_value": 4.0},
+        ],
+    )
+
+
+def test_lentimpra_reader_filters_split_and_reverse_rows(lentimpra_tsv: Path):
+    assert len(LentiMPRADataset(lentimpra_tsv, split="train")) == 1
+    assert len(LentiMPRADataset(lentimpra_tsv, split="val")) == 1
+    # fold 10 has two rows but one is rev == 1.
+    test_ds = LentiMPRADataset(lentimpra_tsv, split="test")
     assert len(test_ds) == 1
+    assert test_ds.inserts == ["CC"]
 
 
-def test_dataset_returns_fixed_length_onehot(tmp_path: Path):
-    _write_dataset(tmp_path)
-    ds = LentiMPRADataset(
-        tmp_path / "HepG2.tsv",
-        split="train",
-        sequence_length=20,
-        construct_spec=ConstructSpec(left_adapter=None, right_adapter=None, promoter_seq=None, barcode_seq=None),
-        construct_mode="none",
-    )
-    seq, target = ds[0]
-
-    assert isinstance(seq, torch.Tensor)
-    assert seq.shape == (20, 4)
-    assert target.shape == ()
-    assert target.item() == 1.0
+def test_lentimpra_reader_honours_custom_folds(lentimpra_tsv: Path):
+    ds = LentiMPRADataset(lentimpra_tsv, split="train", train_folds=[1, 2])
+    assert sorted(ds.inserts) == ["AC", "GT"]
 
 
-def test_dataset_leaves_sequence_unpadded_when_length_omitted(tmp_path: Path):
-    _write_dataset(tmp_path)
-    ds = LentiMPRADataset(
-        tmp_path / "HepG2.tsv",
-        split="train",
-        construct_spec=ConstructSpec.lentimpra_default(),
-    )
-
-    seq, _ = ds[0]
-    assert ds.sequence_length is None
-    assert seq.shape[1] == 4
+def test_lentimpra_reader_passes_the_construct_through(lentimpra_tsv: Path):
+    ds = LentiMPRADataset(lentimpra_tsv, split="test", construct=Construct(suffix="GG", length=4))
+    assert _decode(ds[0][0]) == "CCGG"
 
 
-def test_dataset_supports_custom_folds(tmp_path: Path):
-    _write_dataset(tmp_path)
-    ds = LentiMPRADataset(
-        tmp_path / "HepG2.tsv",
-        split="train",
-        train_folds=[10],
-        construct_spec=ConstructSpec(left_adapter=None, right_adapter=None, promoter_seq=None, barcode_seq=None),
-        construct_mode="none",
+def test_lentimpra_reader_rejects_an_unknown_split(lentimpra_tsv: Path):
+    with pytest.raises(ValueError, match="Unknown split"):
+        LentiMPRADataset(lentimpra_tsv, split="holdout")
+
+
+def test_reader_reports_a_missing_file(tmp_path: Path):
+    with pytest.raises(FileNotFoundError, match="Dataset file not found"):
+        LentiMPRADataset(tmp_path / "absent.tsv", split="train")
+
+
+@pytest.fixture
+def deepstarr_tsv(tmp_path: Path) -> Path:
+    return _write_tsv(
+        tmp_path / "deepstarr.tsv",
+        ["sequence", "set", "Dev_log2_enrichment", "Hk_log2_enrichment"],
+        [
+            {"sequence": "AC", "set": "train", "Dev_log2_enrichment": 1.0, "Hk_log2_enrichment": 2.0},
+            {"sequence": "GT", "set": "test", "Dev_log2_enrichment": 3.0, "Hk_log2_enrichment": 4.0},
+        ],
     )
 
+
+def test_deepstarr_reader_selects_the_split_and_two_targets(deepstarr_tsv: Path):
+    ds = DeepSTARRDataset(deepstarr_tsv, split="test")
     assert len(ds) == 1
-    _, target = ds[0]
-    assert target.item() == 4.0
+    onehot, target = ds[0]
+    assert _decode(onehot) == "GT"
+    torch.testing.assert_close(target, torch.tensor([3.0, 4.0]))
 
 
-def test_dataset_optionally_includes_adapters(tmp_path: Path):
-    _write_dataset(tmp_path)
-    spec = ConstructSpec(left_adapter="AA", right_adapter="CC", promoter_seq="G", barcode_seq="T")
-    ds = LentiMPRADataset(
-        tmp_path / "HepG2.tsv",
-        split="train",
-        sequence_length=32,
-        construct_spec=spec,
-        construct_mode="all",
-    )
-
-    seq, _ = ds[0]
-    assert torch.equal(seq[0], torch.tensor([1.0, 0.0, 0.0, 0.0]))
-    assert torch.equal(seq[1], torch.tensor([1.0, 0.0, 0.0, 0.0]))
-    assert onehot_to_sequence(seq[:8].numpy()) == spec.assemble_sequence("AC", mode="all")
+def test_deepstarr_reader_applies_the_construct(deepstarr_tsv: Path):
+    ds = DeepSTARRDataset(deepstarr_tsv, split="train", construct=Construct(prefix="TT", suffix="AA", length=6))
+    assert _decode(ds[0][0]) == "TTACAA"
 
 
-def test_dataset_uses_construct_mode(tmp_path: Path):
-    _write_dataset(tmp_path)
-    spec = ConstructSpec(left_adapter="AA", right_adapter="CC", promoter_seq="G", barcode_seq="T")
-    ds = LentiMPRADataset(
-        tmp_path / "HepG2.tsv",
-        split="train",
-        sequence_length=32,
-        construct_spec=spec,
-        construct_mode="promoter_barcode",
-    )
-
-    seq, _ = ds[0]
-    assert onehot_to_sequence(seq[:4].numpy()) == spec.assemble_sequence("AC", mode="promoter_barcode")
-
-
-def test_dataset_requires_construct_spec(tmp_path: Path):
-    _write_dataset(tmp_path)
-
-    try:
-        LentiMPRADataset(tmp_path / "HepG2.tsv", split="train", sequence_length=20)
-    except ValueError as exc:
-        assert "construct_spec must be provided" in str(exc)
-    else:
-        raise AssertionError("Expected ValueError when construct_spec is omitted")
-
-
-def test_dataset_uses_natural_construct_length_when_length_omitted(tmp_path: Path):
-    _write_dataset(tmp_path)
-    spec = ConstructSpec(left_adapter="AA", right_adapter=None, promoter_seq="G", barcode_seq="T")
-    ds = LentiMPRADataset(
-        tmp_path / "HepG2.tsv",
-        split="train",
-        construct_spec=spec,
-        construct_mode="promoter_barcode",
-    )
-
-    seq, _ = ds[0]
-    assert seq.shape == (4, 4)
-    assert onehot_to_sequence(seq.numpy()) == spec.assemble_sequence("AC", mode="promoter_barcode")
-
-
-def test_dataset_pads_when_sequence_length_exceeds_construct_length(tmp_path: Path):
-    _write_dataset(tmp_path)
-    ds = LentiMPRADataset(
-        tmp_path / "HepG2.tsv",
-        split="train",
-        sequence_length=6,
-        construct_spec=ConstructSpec(left_adapter=None, right_adapter=None, promoter_seq=None, barcode_seq=None),
-        construct_mode="none",
-    )
-
-    seq, _ = ds[0]
-    assert seq.shape == (6, 4)
-    assert onehot_to_sequence(seq[:2].numpy()) == "AC"
-    assert torch.equal(seq[2:], torch.zeros(4, 4))
-
-
-def test_dataset_rejects_sequence_length_shorter_than_construct(tmp_path: Path):
-    _write_dataset(tmp_path)
-
-    with pytest.raises(ValueError, match="sequence_length is shorter than the assembled construct length"):
-        LentiMPRADataset(
-            tmp_path / "HepG2.tsv",
-            split="train",
-            sequence_length=1,
-            construct_spec=ConstructSpec(left_adapter=None, right_adapter=None, promoter_seq=None, barcode_seq=None),
-            construct_mode="none",
-        )
-
-
-def test_dataset_allows_variable_construct_lengths_when_length_omitted(tmp_path: Path):
-    with open(tmp_path / "HepG2.tsv", "w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["seq", "rev", "fold", "mean_value"], delimiter="\t")
-        writer.writeheader()
-        writer.writerows(
-            [
-                {"seq": "A", "rev": 0, "fold": 2, "mean_value": 1.0},
-                {"seq": "AC", "rev": 0, "fold": 2, "mean_value": 2.0},
-            ]
-        )
-
-    ds = LentiMPRADataset(
-        tmp_path / "HepG2.tsv",
-        split="train",
-        construct_spec=ConstructSpec(left_adapter=None, right_adapter=None, promoter_seq=None, barcode_seq=None),
-        construct_mode="none",
-    )
-
-    seq0, _ = ds[0]
-    seq1, _ = ds[1]
-    assert seq0.shape == (1, 4)
-    assert seq1.shape == (2, 4)
+def test_deepstarr_reader_rejects_empty_target_columns(deepstarr_tsv: Path):
+    with pytest.raises(ValueError, match="target_columns"):
+        DeepSTARRDataset(deepstarr_tsv, split="train", target_columns=())

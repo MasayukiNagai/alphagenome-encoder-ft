@@ -1,7 +1,7 @@
 [project]
 name = "alphagenome-encoder-ft"
-version = "0.1.0"
-description = "Encoder-only AlphaGenome fine-tuning utilities for lentiMPRA."
+version = "1.0.0"
+description = "Encoder-only AlphaGenome fine-tuning for MPRA, with reporter-construct-aware inference."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

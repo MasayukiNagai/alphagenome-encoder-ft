@@ -275,7 +275,14 @@ def save_checkpoint(
     epoch: int,
     metrics: dict[str, Any] | None = None,
 ) -> Path:
-    """Save a checkpoint following the repo checkpoint contract."""
+    """Save a checkpoint following the repo checkpoint contract.
+
+    The payload carries the model's ``construct`` (or ``None``) and ``input_length`` so
+    ``AlphaGenomeEncoderModel.from_checkpoint`` can rebuild the head and score raw inserts.
+    """
+
+    if model.input_length is None:
+        raise ValueError("model.input_length is unset; call model.initialize_head(...) before saving")
 
     checkpoint_path = Path(path)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
@@ -288,7 +295,8 @@ def save_checkpoint(
         "head_type": config.head.head_type,
         "head_state_dict": model.head.state_dict(),
         "head_config": config.head_kwargs(),
-        "construct_config": config.construct_config(),
+        "construct": model.construct.to_dict() if model.construct is not None else None,
+        "input_length": int(model.input_length),
         "metrics": metrics or {},
     }
 

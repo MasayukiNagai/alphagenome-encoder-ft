@@ -1,173 +1,178 @@
 # AlphaGenome Encoder Fine-tuning
 
-`alphagenome-encoder-ft` is a PyTorch implementation of the encoder-only fine-tuning workflow from [`alphagenome_FT_MPRA`](https://github.com/Al-Murphy/alphagenome_FT_MPRA).
+`alphagenome-encoder-ft` is a PyTorch implementation of the encoder-only fine-tuning workflow from [`alphagenome_FT_MPRA`](https://github.com/Al-Murphy/alphagenome_FT_MPRA), built on [`alphagenome-pytorch`](https://github.com/genomicsxai/alphagenome-pytorch).
 
-This repository is built on top of [`alphagenome-pytorch`](https://github.com/genomicsxai/alphagenome-pytorch/tree/main) and focuses on a smaller scope than the original JAX-based project. In particular, it currently targets lentiMPRA-style scalar regression with AlphaGenome encoder features, reusable encoder-only training utilities, and shared construct assembly utilities for inference.
+It fine-tunes the AlphaGenome encoder on massively parallel reporter assays (MPRA) and predicts regulatory activity for new inserts, so a trained model can be used to score variants and run attribution.
 
-Note: The current codebase does not yet include the full feature surface of `alphagenome_FT_MPRA`, such as attribution pipelines, cached embedding workflows, or the full collection of benchmarking and downstream analysis scripts.
+Note: this does not cover the full feature surface of `alphagenome_FT_MPRA`, such as cached embedding workflows or the full collection of benchmarking scripts.
+
+## The core idea: the insert is the only variable part
+
+In an MPRA the assayed molecule is a reporter construct. Only the insert changes between rows; the adapters, minimal promoter, barcode and vector backbone are fixed for a library. A `Construct` holds that fixed context, so the same rule builds the model input during training and at inference, and it is saved into the checkpoint.
+
+That is what makes this work after loading a checkpoint:
+
+```python
+from alphagenome_encoder_ft import AlphaGenomeEncoderModel
+
+model = AlphaGenomeEncoderModel.from_checkpoint("best.pt")
+
+# variant effect: the insert is all you pass
+effect = model.predict_inserts([alt_insert]) - model.predict_inserts([ref_insert])
+```
 
 ## Supported heads
 
 | `head_type` | Class | Outputs | Default use |
 |-------------|-------|---------|-------------|
-| `mpra` (default) | `MPRAHead` | 1 scalar per sequence | LentiMPRA-style scalar regression |
+| `mpra` (default) | `MPRAHead` | 1 scalar per sequence | lentiMPRA-style scalar regression |
 | `deepstarr` | `DeepSTARRHead` | 2 scalars per sequence (dev, hk) | Drosophila STARR-seq dual-output regression |
 
-Both heads share the same pooling modes (`flatten`, `center`, `mean`, `sum`, `max`) and the same `LayerNorm → MLP → Linear` layout; `DeepSTARRHead` is a subclass of `MPRAHead` whose only functional difference is `num_outputs=2`.
-
-Checkpoints persist a top-level `head_type` field so `AlphaGenomeEncoderModel.from_checkpoint(...)` can dispatch to the right class. Checkpoints written before this field existed (no `head_type` key) default to `"mpra"` for backward compatibility.
+Both heads share the same pooling modes (`flatten`, `center`, `mean`, `sum`, `max`) and the same `LayerNorm → MLP → Linear` layout; `DeepSTARRHead` is a subclass of `MPRAHead` whose only functional difference is `num_outputs=2`. Checkpoints persist `head_type` so `from_checkpoint(...)` dispatches to the right class.
 
 ## Installation
 
-`alphagenome-encoder-ft` requires Python 3.12+ and depends on
-[`alphagenome-pytorch`](https://github.com/genomicsxai/alphagenome-pytorch).
-
-Install directly from GitHub:
+Requires Python 3.12+.
 
 ```bash
-pip install "alphagenome-encoder-ft @ git+https://github.com/MasayukiNagai/alphagenome_encoder_ft.git"
-```
-
-```bash
-uv add "alphagenome-encoder-ft @ git+https://github.com/MasayukiNagai/alphagenome_encoder_ft.git"
+uv add "alphagenome-encoder-ft @ git+https://github.com/MasayukiNagai/alphagenome-encoder-ft.git"
 ```
 
 For local development:
-```bash
-git clone https://github.com/MasayukiNagai/alphagenome_encoder_ft.git
-cd alphagenome-encoder-ft
-pip install -e .
-# For training, evaluation, tests
-pip install wandb matplotlib pytest
-```
-
-## Repository Layout
-
-```text
-alphagenome-encoder-ft/
-├── src/alphagenome_encoder_ft/
-│   ├── __init__.py
-│   ├── config.py     # default configs for each cell type
-│   ├── constructs.py # ConstructSpec assembly rules
-│   ├── data.py       # lentiMPRA + DeepSTARR datasets and dataloader helpers
-│   ├── heads.py      # MPRAHead, DeepSTARRHead
-│   ├── model.py      # AlphaGenomeEncoderModel wrapper (AG Encoder + MPRAHead)
-│   └── train.py      # reusable encoder-only training utilities
-├── configs/
-│   ├── lentimpra_HepG2.json
-│   ├── lentimpra_K562.json
-│   └── lentimpra_WTC11.json
-├── scripts/
-│   ├── train_mpra.py    # config/CLI entrypoint for training
-│   ├── evaluate_mpra.py # evaluate a saved checkpoint on the test split
-│   └── ...
-└── tests/
-```
-
-## Train
 
 ```bash
+git clone https://github.com/MasayukiNagai/alphagenome-encoder-ft.git
 cd alphagenome-encoder-ft
-python scripts/train_mpra.py \
-  --config configs/lentimpra_HepG2.json \
-  --input_tsv /path/to/HepG2.tsv \
-  --pretrained_weights /path/to/alphagenome.pt
+uv pip install -e .
+uv pip install wandb matplotlib pytest   # training, evaluation, tests
 ```
+
+## `Construct`
+
+```python
+from alphagenome_encoder_ft import Construct
+
+construct = Construct(prefix="", suffix="TCCATT...GCAATG" + "AGAGACTGAGGCCAC", length=281)
+construct.assemble_sequence(insert)          # -> str, the model input
+construct.assemble_sequences([a, b, c])      # -> list[str]
+construct.assemble_onehot(insert_onehot)     # -> Tensor, differentiable
+```
+
+Three fields, and that is the whole abstraction:
+
+| field | meaning |
+|---|---|
+| `prefix` | fixed sequence before the insert |
+| `suffix` | fixed sequence after the insert |
+| `length` | optional fixed model input length |
+
+**The window rule.** With `length` set, the assembled sequence is windowed to exactly that many bases. Longer sequences are trimmed from both ends; shorter ones are padded with `N` (an all-zero one-hot) on both ends. When the amount is odd, the extra base goes on the suffix side.
+
+```
+prefix + insert + suffix = 13 bp, length=10  ->  trim 1 left, 2 right
+prefix + insert + suffix = 10 bp, length=13  ->  pad  1 left, 2 right
+```
+
+**Jitter.** `offset` slides that window and is the training-time shift augmentation. The dataset draws it per item; inference leaves it at 0, so predictions use the exact centered layout the model was trained on. Because the window (not a roll) does the shifting, sequence never wraps from one end to the other.
+
+`Construct` is optional everywhere. `None` means the sequences are already model inputs.
+
+### Presets
+
+```python
+from alphagenome_encoder_ft import lentimpra_construct, lentimpra_full_construct, deepstarr_construct
+
+lentimpra_construct()       # insert + minP + barcode -> 281 bp (Agarwal TSVs: seq already has adapters)
+lentimpra_full_construct()  # adapters + insert + adapters + minP + barcode -> 281 bp (bare 200 bp insert)
+deepstarr_construct()       # STARR-seq adapters around the insert -> 256 bp
+```
+
+The individual pieces are exported too (`LENTIMPRA_PROMOTER`, `LENTIMPRA_BARCODE`, `LENTIMPRA_LEFT_ADAPTER`, `LENTIMPRA_RIGHT_ADAPTER`, `DEEPSTARR_ADAPTER_UP`, `DEEPSTARR_ADAPTER_DOWN`) for composing a layout of your own.
+
+## Scoring inserts
+
+| method | input | gradients |
+|---|---|---|
+| `predict_inserts(inserts)` | `Sequence[str]` | no, runs under `no_grad` |
+| `forward_inserts(onehot)` | `Tensor (B, L, 4)` | yes |
+| `forward(onehot)` | `Tensor (B, L, 4)`, already assembled | yes |
+
+Attribution over the insert, with the flanks attached inside the graph:
+
+```python
+x = insert_onehot.unsqueeze(0).requires_grad_(True)   # (1, L, 4), insert only
+model.forward_inserts(x).sum().backward()
+saliency = x.grad                                      # (1, L, 4), aligned to the insert
+```
+
+## Datasets
+
+`MPRADataset` takes inserts and targets in memory and owns the construct and the augmentation. It is not tied to a file format, so a variant table assembled in Python works directly:
+
+```python
+from alphagenome_encoder_ft import MPRADataset, lentimpra_construct
+
+ds = MPRADataset(inserts, targets, construct=lentimpra_construct(), reverse_complement=True)
+```
+
+Readers subclass it and parse one assay's layout:
+
+- `LentiMPRADataset(input_tsv, split=...)` — `seq` / `mean_value` / `fold` / `rev`; keeps `rev == 0` and selects folds per split.
+- `DeepSTARRDataset(input_tsv, split=...)` — a split column plus two log2 targets.
+
+Reverse complement applies to the whole assembled sequence, matching a double-stranded plasmid.
+
+## Train and evaluate
+
+One driver per assay, because the dataset layout and the construct are assay-specific:
+
+```bash
+python scripts/train_lentimpra.py \
+  --config configs/lentimpra_K562.json \
+  --input_tsv /path/to/K562.tsv \
+  --pretrained_weights /path/to/alphagenome.safetensors
+
+python scripts/evaluate_lentimpra.py --checkpoint_path results/mpra_K562/stage2/best.pt
+```
+
+`--construct_prefix`, `--construct_suffix`, `--construct_length` and `--no-construct` override the driver's default construct for a run. Config files hold training hyperparameters only; the input file and the construct are the driver's arguments. Training writes `config.json`, `run.json` (construct, input length, input TSV) and `history.json` into the run directory, and evaluation reads the construct back from the checkpoint.
 
 - Input TSV for lentiMPRA: https://github.com/autosome-ru/human_legnet
 - Pretrained weights: https://huggingface.co/gtca/alphagenome_pytorch
 
-For local runs without installation, you can use `PYTHONPATH=src`.
-
-`data.construct_mode` now uses the modes implemented by `ConstructSpec`:
-`none`, `adapters`, `promoter`, `promoter_barcode`, and `all`.
-The default in config is `promoter_barcode`.
-
-## Evaluate
-
-```bash
-cd alphagenome-encoder-ft
-python scripts/evaluate_mpra.py \
-  --checkpoint_path /path/to/best.pt \
-  --output_dir /path/to/eval_outputs
-```
-
-The evaluator reconstructs the model from the checkpoint config, runs the `test` split, computes Pearson and Spearman over the full concatenated test set, and saves:
-
-- `test_metrics.json`
-- `test_predictions.csv`
-- `y_vs_y_pred.png`
-
-## Load checkpoint
-
-```python
-from alphagenome_encoder_ft import AlphaGenomeEncoderModel
-
-model = AlphaGenomeEncoderModel.from_checkpoint("/path/to/best.pt")
-construct = model.construct_spec.assemble_sequence("ACGT", mode="promoter_barcode")
-```
-
-- Standalone loading supports `save_mode="minimal"` and `save_mode="full"`.
-- `save_mode="head"` does not include enough backbone state to reconstruct an `AlphaGenomeEncoderModel` by itself.
-- `EncoderMPRAModel` remains available as a backward-compatible alias.
-- The checkpoint from `train_mpra.py` already contains the construct definition under `construct_config`, so `model.construct_spec` is typically ready to use after `from_checkpoint(...)`. For `construct_spec`, see below.
-
-## Construct MPRA reporters
-
-In MPRA, the assayed sequence is not just the variable insert itself. The
-full reporter often includes fixed backbone pieces such as cloning adapters, a promoter, and a barcode. The exact construct depends on the assay design, but a typical reporter looks like:
+## Layout
 
 ```text
-left_adapter + insert + right_adapter + promoter + barcode
+src/alphagenome_encoder_ft/
+├── constructs.py # Construct + assay presets
+├── data.py       # MPRADataset base + per-assay readers
+├── heads.py      # MPRAHead, DeepSTARRHead
+├── model.py      # AlphaGenomeEncoderModel (backbone + head + construct)
+├── train.py      # training loop, checkpointing
+├── config.py     # TrainConfig and friends
+└── driver.py     # shared CLI/train/evaluate plumbing for the scripts
+scripts/
+├── train_lentimpra.py / evaluate_lentimpra.py
+├── train_deepstarr.py / evaluate_deepstarr.py
+└── convert_checkpoint_v0.py
 ```
 
-During training or inference, you might want to control which of those fixed pieces are included around the insert sequence. `ConstructSpec` provides that assembly logic in one place.
+## Upgrading from 0.x
 
-If your data always arrives in the same final reporter shape, `ConstructSpec` is not necessary. It is an optional convenience for flexible assembly, mainly included for downstream applications that need to switch construct layouts (e.g., designing the insert, using different models which take different portions)
+Version 1.0 replaced `ConstructSpec` (four named reporter pieces plus a five-way `construct_mode`) with `Construct`, and the loaders do not read the old format.
 
-### `ConstructSpec`
+- **Old checkpoints**: convert once, then load normally.
 
-[`ConstructSpec`](https://github.com/MasayukiNagai/alphagenome-encoder-ft/blob/main/src/alphagenome_encoder_ft/constructs.py) defines the fixed reporter pieces:
-`left_adapter`, `right_adapter`, `promoter_seq`, and `barcode_seq`.
+  ```bash
+  python scripts/convert_checkpoint_v0.py old.pt new.pt
+  ```
 
-Use the default lentiMPRA construct:
+  The converter maps each old `construct_mode` to the prefix and suffix it concatenated, and carries `sequence_length` over as `input_length`. Weights are untouched.
 
-```python
-from alphagenome_encoder_ft import ConstructSpec
+- **Old code**: pin the previous release.
 
-construct_spec = ConstructSpec.lentimpra_default()
-```
+  ```bash
+  uv add "alphagenome-encoder-ft @ git+https://github.com/MasayukiNagai/alphagenome-encoder-ft.git@v0.1.0"
+  ```
 
-Or override the pieces for your assay:
-
-```python
-from alphagenome_encoder_ft import ConstructSpec
-
-construct_spec = ConstructSpec(
-    left_adapter="AAA",
-    right_adapter="TTT",
-    promoter_seq="GGGG",
-    barcode_seq="CCCC",
-)
-```
-
-### Assembly modes
-
-`ConstructSpec` supports the following modes:
-
-- `none`: insert only (i.e., nothing will be added)
-- `adapters`: left adapter + insert + right adapter
-- `promoter`: insert + promoter
-- `promoter_barcode`: insert + promoter + barcode
-- `all`: left adapter + insert + right adapter + promoter + barcode
-
-Example:
-
-```python
-construct_spec = ConstructSpec.lentimpra_default()
-reporter = construct_spec.assemble_sequence("MYSEQUENCE", mode="promoter_barcode")
-# reporter: MYSEQUENCE + PROMOTER + BARCODE
-```
-For a list of sequences, use `assemble_sequences(...)`.
-
-For one-hot inputs, use `assemble_onehot(...)` with the same modes.
+Other renames: `EncoderMPRAModel` is gone (use `AlphaGenomeEncoderModel`), `predict_sequences` is replaced by `predict_inserts` and `forward_inserts`, and `DataConfig` no longer carries `input_tsv`, `sequence_length`, `construct_mode` or the adapter/promoter/barcode fields.

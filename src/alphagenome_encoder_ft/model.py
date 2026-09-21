@@ -1,4 +1,4 @@
-"""Wrapped AlphaGenome encoder + MPRA head model."""
+"""Wrapped AlphaGenome encoder + regression head, with the reporter construct attached."""
 
 from __future__ import annotations
 
@@ -7,30 +7,36 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+from torch import Tensor
 
 from alphagenome_pytorch import AlphaGenome
 from alphagenome_pytorch.extensions.finetuning.transfer import load_trunk, remove_all_heads
 from alphagenome_pytorch.utils.sequence import sequence_to_onehot_tensor
 
 from .config import HeadConfig, build_head
-from .constructs import ConstructSpec
-from .heads import MPRAHead
+from .constructs import Construct
 
 
 class AlphaGenomeEncoderModel(nn.Module):
-    """Thin wrapper around an AlphaGenome backbone and an MPRA regression head."""
+    """AlphaGenome backbone + head.
+
+    ``forward`` takes the final model input (one-hot of the assembled reporter).
+    ``predict_inserts`` / ``forward_inserts`` take *inserts* and let ``self.construct`` add
+    the fixed flanks, so a loaded checkpoint scores new inserts with no extra bookkeeping.
+    """
 
     def __init__(
         self,
         backbone: nn.Module,
         head: nn.Module,
         *,
-        construct_spec: ConstructSpec | None = None,
+        construct: Construct | None = None,
     ) -> None:
         super().__init__()
         self.backbone = backbone
         self.head = head
-        self.construct_spec = construct_spec
+        self.construct = construct
+        self.input_length: int | None = None
 
     @property
     def encoder(self) -> nn.Module:
@@ -38,64 +44,67 @@ class AlphaGenomeEncoderModel(nn.Module):
             raise AttributeError("Backbone does not expose an 'encoder' module")
         return self.backbone.encoder
 
-    def encode(
-        self,
-        sequences: torch.Tensor,
-        organism_idx: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    # -------------------------
+    # Forward paths
+    # -------------------------
+
+    def encode(self, sequences: Tensor, organism_idx: Tensor | None = None) -> Tensor:
         if organism_idx is None:
             organism_idx = torch.zeros(sequences.shape[0], dtype=torch.long, device=sequences.device)
         outputs = self.backbone(sequences, organism_idx, encoder_only=True)
         return outputs["encoder_output"]
 
-    def predict_from_encoder(self, encoder_output: torch.Tensor) -> torch.Tensor:
+    def predict_from_encoder(self, encoder_output: Tensor) -> Tensor:
         return self.head(encoder_output)
 
-    def forward(
-        self,
-        sequences: torch.Tensor,
-        organism_idx: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    def forward(self, sequences: Tensor, organism_idx: Tensor | None = None) -> Tensor:
+        """Final model input ``(B, L, 4)`` in, predictions out."""
+
         return self.predict_from_encoder(self.encode(sequences, organism_idx))
 
-    def predict_sequences(
-        self,
-        sequences: Sequence[str],
-        *,
-        construct_mode: str | None = None,
-        organism_idx: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        batch_sequences = list(sequences)
-        if not batch_sequences:
-            raise ValueError("predict_sequences requires at least one sequence")
+    def forward_inserts(self, inserts: Tensor, organism_idx: Tensor | None = None) -> Tensor:
+        """Insert one-hots ``(B, L, 4)`` in; flanks attached inside the graph.
 
-        if construct_mode is not None:
-            if self.construct_spec is None:
-                raise ValueError("construct_mode requires model.construct_spec to be set")
-            batch_sequences = self.construct_spec.assemble_sequences(batch_sequences, mode=construct_mode)
-        else:
-            batch_sequences = [seq.strip().upper() for seq in batch_sequences]
+        Gradients flow back to ``inserts``, so this is the entry point for attribution.
+        """
 
-        lengths = {len(seq) for seq in batch_sequences}
-        if len(lengths) != 1:
-            raise ValueError("All sequences must have the same length")
+        if inserts.ndim != 3 or inserts.shape[-1] != 4:
+            raise ValueError(f"Expected inserts of shape (B, L, 4), got {tuple(inserts.shape)}")
+        sequences = self.construct.assemble_onehot(inserts) if self.construct is not None else inserts
+        return self(sequences, organism_idx)
+
+    def predict_inserts(self, inserts: Sequence[str], organism_idx: Tensor | None = None) -> Tensor:
+        """Insert strings in, predictions out, under ``no_grad``."""
+
+        batch = [insert.strip().upper() for insert in inserts]
+        if not batch:
+            raise ValueError("predict_inserts requires at least one insert")
+        if self.construct is not None:
+            batch = self.construct.assemble_sequences(batch)
+        if len({len(seq) for seq in batch}) != 1:
+            raise ValueError("All assembled sequences must have the same length")
 
         device = next(self.parameters()).device
         onehot = torch.stack(
-            [sequence_to_onehot_tensor(seq, dtype=torch.float32, device=device) for seq in batch_sequences],
+            [sequence_to_onehot_tensor(seq, dtype=torch.float32, device=device) for seq in batch],
             dim=0,
         )
-
         with torch.no_grad():
             return self(onehot, organism_idx)
 
+    # -------------------------
+    # Parameter handling
+    # -------------------------
+
     def initialize_head(self, sequence_length: int, device: torch.device | str) -> None:
+        """Run one dummy forward so lazily-shaped head layers materialize, and remember the length."""
+
         with torch.no_grad():
             device = torch.device(device)
             dummy_sequence = torch.zeros(1, sequence_length, 4, device=device)
             dummy_organism_idx = torch.zeros(1, dtype=torch.long, device=device)
-            encoder_output = self.encode(dummy_sequence, dummy_organism_idx)
-            _ = self.predict_from_encoder(encoder_output)
+            _ = self.predict_from_encoder(self.encode(dummy_sequence, dummy_organism_idx))
+        self.input_length = int(sequence_length)
 
     def set_encoder_trainable(self, trainable: bool) -> None:
         for param in self.encoder.parameters():
@@ -113,6 +122,10 @@ class AlphaGenomeEncoderModel(nn.Module):
                 seen.add(id(param))
         return deduped
 
+    # -------------------------
+    # Constructors
+    # -------------------------
+
     @staticmethod
     def _resolve_device(device: torch.device | str | None) -> torch.device:
         if device is None:
@@ -126,7 +139,7 @@ class AlphaGenomeEncoderModel(nn.Module):
         head_config: HeadConfig,
         *,
         device: torch.device | str | None = None,
-        construct_spec: ConstructSpec | None = None,
+        construct: Construct | None = None,
         backbone_factory=AlphaGenome,
         head_type: str | None = None,
     ) -> "AlphaGenomeEncoderModel":
@@ -136,7 +149,7 @@ class AlphaGenomeEncoderModel(nn.Module):
         backbone = remove_all_heads(backbone)
         resolved_head_type = head_type or getattr(head_config, "head_type", "mpra")
         head = build_head(resolved_head_type, head_config.__dict__)
-        model = cls(backbone, head, construct_spec=construct_spec)
+        model = cls(backbone, head, construct=construct)
         model.set_encoder_trainable(False)
         model.to(device)
         return model
@@ -155,31 +168,19 @@ class AlphaGenomeEncoderModel(nn.Module):
         if save_mode == "head":
             raise ValueError("Head-only checkpoints cannot be loaded standalone")
 
-        head_config_dict = dict(checkpoint.get("head_config", {}))
-        # backward compat: historical ckpts omit head_type; default to "mpra".
-        head_type = checkpoint.get("head_type", head_config_dict.get("head_type", "mpra"))
-        construct_config = checkpoint.get("construct_config", {})
-        construct_spec = ConstructSpec(
-            left_adapter=construct_config.get("left_adapter"),
-            right_adapter=construct_config.get("right_adapter"),
-            promoter_seq=construct_config.get("promoter_seq"),
-            barcode_seq=construct_config.get("barcode_seq"),
-        )
+        if "input_length" not in checkpoint or "construct" not in checkpoint:
+            raise ValueError(
+                f"{checkpoint_path} predates the Construct checkpoint format (missing 'construct' / "
+                "'input_length'); convert it with scripts/convert_checkpoint_v0.py"
+            )
 
-        model = cls(
-            backbone_factory(),
-            build_head(head_type, head_config_dict),
-            construct_spec=construct_spec,
-        )
+        head_config_dict = dict(checkpoint.get("head_config", {}))
+        head_type = checkpoint.get("head_type", head_config_dict.get("head_type", "mpra"))
+        construct = Construct.from_dict(checkpoint["construct"])
+
+        model = cls(backbone_factory(), build_head(head_type, head_config_dict), construct=construct)
         model.to(device)
-        sequence_length = construct_config.get("sequence_length")
-        if sequence_length is None:
-            config = checkpoint.get("config", {})
-            if isinstance(config, dict):
-                sequence_length = config.get("data", {}).get("sequence_length")
-        if sequence_length is None:
-            raise ValueError("Checkpoint is missing construct sequence_length needed to initialize the head")
-        model.initialize_head(int(sequence_length), device)
+        model.initialize_head(int(checkpoint["input_length"]), device)
 
         if save_mode == "minimal":
             model.encoder.load_state_dict(checkpoint["encoder_state_dict"])
@@ -193,7 +194,3 @@ class AlphaGenomeEncoderModel(nn.Module):
         model.to(device)
         model.eval()
         return model
-
-
-# Backward compatibility alias.
-EncoderMPRAModel = AlphaGenomeEncoderModel

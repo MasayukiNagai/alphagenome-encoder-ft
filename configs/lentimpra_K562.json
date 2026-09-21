@@ -1,9 +1,11 @@
 {
-  "_comment": "Normalized config schema for LentiMPRA K562 training.",
+  "_comment": [
+    "LentiMPRA K562. Training hyperparameters only.",
+    "The dataset file and the reporter construct are not config: pass --input_tsv and let",
+    "train_lentimpra.py build lentimpra_construct(), or override it with",
+    "--construct_prefix / --construct_suffix / --construct_length / --no-construct."
+  ],
   "data": {
-    "input_tsv": null,
-    "sequence_length": null,
-    "construct_mode": "promoter_barcode",
     "batch_size": 32,
     "reverse_complement": true,
     "rc_prob": 0.5,

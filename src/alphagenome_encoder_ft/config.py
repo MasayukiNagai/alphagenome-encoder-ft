@@ -44,9 +44,8 @@ def _deep_merge(base: dict[str, Any], overrides: Mapping[str, Any]) -> dict[str,
 
 @dataclass
 class DataConfig:
-    input_tsv: str | None = None
-    sequence_length: int | None = None
-    construct_mode: str = "promoter_barcode"
+    """Loader and augmentation settings. What the data *is* (file, construct) belongs to the driver."""
+
     batch_size: int = 32
     reverse_complement: bool = False
     rc_prob: float = 0.5
@@ -56,18 +55,8 @@ class DataConfig:
     subset_frac: float = 1.0
     num_workers: int = 0
     pin_memory: bool = False
-    left_adapter_seq: str | None = None
-    right_adapter_seq: str | None = None
-    promoter_seq: str | None = None
-    barcode_seq: str | None = None
 
     def __post_init__(self) -> None:
-        if self.sequence_length is not None and self.sequence_length <= 0:
-            raise ValueError("data.sequence_length must be > 0")
-        if self.construct_mode not in {"none", "adapters", "promoter", "promoter_barcode", "all"}:
-            raise ValueError(
-                "data.construct_mode must be one of none, adapters, promoter, promoter_barcode, all"
-            )
         if not 0 < self.subset_frac <= 1:
             raise ValueError("data.subset_frac must be in (0, 1]")
         if not 0 <= self.rc_prob <= 1:
@@ -213,8 +202,6 @@ class TrainConfig:
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
 
     def validate(self) -> None:
-        if not self.data.input_tsv:
-            raise ValueError("data.input_tsv must be provided via config or CLI")
         if not self.checkpoint.pretrained_weights:
             raise ValueError("checkpoint.pretrained_weights must be provided via config or CLI")
 
@@ -229,16 +216,6 @@ class TrainConfig:
             "dropout": self.head.dropout,
             "activation": self.head.activation,
             "num_outputs": self.head.num_outputs,
-        }
-
-    def construct_config(self) -> dict[str, Any]:
-        return {
-            "left_adapter": self.data.left_adapter_seq,
-            "right_adapter": self.data.right_adapter_seq,
-            "promoter_seq": self.data.promoter_seq,
-            "barcode_seq": self.data.barcode_seq,
-            "construct_mode": self.data.construct_mode,
-            "sequence_length": self.data.sequence_length,
         }
 
     @classmethod
