@@ -87,7 +87,16 @@ lentimpra_full_construct()  # adapters + insert + adapters + minP + barcode -> 2
 deepstarr_construct()       # STARR-seq adapters around the insert -> 256 bp
 ```
 
-The individual pieces are exported too (`LENTIMPRA_PROMOTER`, `LENTIMPRA_BARCODE`, `LENTIMPRA_LEFT_ADAPTER`, `LENTIMPRA_RIGHT_ADAPTER`, `DEEPSTARR_ADAPTER_UP`, `DEEPSTARR_ADAPTER_DOWN`) for composing a layout of your own.
+The individual pieces live in `alphagenome_encoder_ft.constructs` rather than the top-level API, for composing a layout of your own, such as an ablation that drops the barcode:
+
+```python
+from alphagenome_encoder_ft import Construct
+from alphagenome_encoder_ft.constructs import LENTIMPRA_PROMOTER
+
+promoter_only = Construct(suffix=LENTIMPRA_PROMOTER, length=281)
+```
+
+Available: `LENTIMPRA_PROMOTER`, `LENTIMPRA_BARCODE`, `LENTIMPRA_LEFT_ADAPTER`, `LENTIMPRA_RIGHT_ADAPTER`, `DEEPSTARR_ADAPTER_UP`, `DEEPSTARR_ADAPTER_DOWN`.
 
 ## Scoring inserts
 

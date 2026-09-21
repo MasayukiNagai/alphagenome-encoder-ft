@@ -22,12 +22,6 @@ __all__ = [
     "lentimpra_construct",
     "lentimpra_full_construct",
     "deepstarr_construct",
-    "LENTIMPRA_BARCODE",
-    "LENTIMPRA_LEFT_ADAPTER",
-    "LENTIMPRA_PROMOTER",
-    "LENTIMPRA_RIGHT_ADAPTER",
-    "DEEPSTARR_ADAPTER_UP",
-    "DEEPSTARR_ADAPTER_DOWN",
     "AlphaGenomeEncoderModel",
     "MPRAHead",
     "DeepSTARRHead",
@@ -48,19 +42,11 @@ _MODULE_BY_NAME = {
         ["MPRADataset", "LentiMPRADataset", "DeepSTARRDataset", "read_tsv_rows", "create_dataloader"],
         "data",
     ),
+    # The individual reporter pieces (LENTIMPRA_PROMOTER and friends) stay in
+    # alphagenome_encoder_ft.constructs rather than the top-level API: they are building
+    # blocks for composing a custom layout, not part of the curated surface.
     **dict.fromkeys(
-        [
-            "Construct",
-            "lentimpra_construct",
-            "lentimpra_full_construct",
-            "deepstarr_construct",
-            "LENTIMPRA_BARCODE",
-            "LENTIMPRA_LEFT_ADAPTER",
-            "LENTIMPRA_PROMOTER",
-            "LENTIMPRA_RIGHT_ADAPTER",
-            "DEEPSTARR_ADAPTER_UP",
-            "DEEPSTARR_ADAPTER_DOWN",
-        ],
+        ["Construct", "lentimpra_construct", "lentimpra_full_construct", "deepstarr_construct"],
         "constructs",
     ),
     **dict.fromkeys(
