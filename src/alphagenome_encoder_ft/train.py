@@ -22,8 +22,28 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 
 try:
     from tqdm.auto import tqdm
-except ImportError:
+except ImportError:  # optional: only needed when show_progress is set
     tqdm = None
+
+_warned_about_tqdm = False
+
+
+def _progress_iterator(iterable, *, total: int | None, show_progress: bool) -> tuple[Any, bool]:
+    """Wrap ``iterable`` in a progress bar when asked for and available.
+
+    Returns the iterator and whether it is a bar, so callers know if they can post to it.
+    """
+
+    global _warned_about_tqdm
+
+    if not show_progress:
+        return iterable, False
+    if tqdm is None:
+        if not _warned_about_tqdm:
+            print("tqdm is not installed; continuing without a progress bar")
+            _warned_about_tqdm = True
+        return iterable, False
+    return tqdm(iterable, total=total, desc="train", leave=False), True
 
 from .config import OptimConfig, TrainConfig
 from .metrics import per_track, pearsonr
@@ -150,15 +170,9 @@ def train_epoch(
 
     optimizer.zero_grad(set_to_none=True)
 
-    num_batches = _num_batches(train_loader)
-    batch_iterator = train_loader
-    if tqdm is not None and show_progress:
-        batch_iterator = tqdm(
-            train_loader,
-            total=num_batches,
-            desc="train",
-            leave=False,
-        )
+    batch_iterator, showing_progress = _progress_iterator(
+        train_loader, total=_num_batches(train_loader), show_progress=show_progress
+    )
 
     for batch_idx, (sequences, targets) in enumerate(batch_iterator, start=1):
         sequences = sequences.to(device)
@@ -194,7 +208,7 @@ def train_epoch(
         all_preds.append(preds.detach().float().cpu())
         all_targets.append(targets.detach().float().cpu())
 
-        if tqdm is not None and show_progress:
+        if showing_progress:
             batch_iterator.set_postfix(loss=total_loss / max(1, total_samples))
 
         if batch_end_callback is not None and not batch_end_callback(batch_idx, len(train_loader)):

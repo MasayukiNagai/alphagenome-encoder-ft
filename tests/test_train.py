@@ -497,3 +497,59 @@ def test_save_checkpoint_persists_head_type_deepstarr(tmp_path: Path):
     payload = torch.load(path, map_location="cpu", weights_only=False)
     assert payload["head_type"] == "deepstarr"
     assert payload["head_config"]["num_outputs"] == 2
+
+
+# -------------------------
+# Progress bar (tqdm is optional)
+# -------------------------
+
+
+def test_progress_iterator_passes_through_when_not_asked_for():
+    rows = [1, 2, 3]
+    iterator, showing = train_module._progress_iterator(rows, total=3, show_progress=False)
+    assert iterator is rows
+    assert showing is False
+
+
+def test_progress_iterator_returns_a_bar_when_tqdm_is_available():
+    if train_module.tqdm is None:
+        pytest.skip("tqdm is not installed")
+    iterator, showing = train_module._progress_iterator([1, 2, 3], total=3, show_progress=True)
+    assert showing is True
+    assert hasattr(iterator, "set_postfix")
+
+
+def test_progress_iterator_warns_once_and_falls_back_without_tqdm(monkeypatch, capsys):
+    # tqdm lives in the optional train group, so --show_progress must say something
+    # rather than silently doing nothing.
+    monkeypatch.setattr(train_module, "tqdm", None)
+    monkeypatch.setattr(train_module, "_warned_about_tqdm", False)
+    rows = [1, 2, 3]
+
+    iterator, showing = train_module._progress_iterator(rows, total=3, show_progress=True)
+    train_module._progress_iterator(rows, total=3, show_progress=True)
+
+    assert iterator is rows
+    assert showing is False
+    assert capsys.readouterr().out.count("tqdm is not installed") == 1
+
+
+def test_training_runs_with_show_progress_and_no_tqdm(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(train_module, "tqdm", None)
+    model = _make_model()
+    config = _make_config(tmp_path)
+
+    result = run_training_stage(
+        model,
+        _make_loader(),
+        optimizer=torch.optim.Adam(model.head.parameters(), lr=1e-2),
+        config=config,
+        device="cpu",
+        num_epochs=1,
+        stage="stage1",
+        train_encoder=False,
+        checkpoint_dir=tmp_path / "stage1",
+        show_progress=True,
+    )
+
+    assert result["best_checkpoint_path"] is not None

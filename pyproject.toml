@@ -7,7 +7,6 @@ requires-python = ">=3.12"
 dependencies = [
     "alphagenome-pytorch @ git+https://github.com/genomicsxai/alphagenome-pytorch.git",
     "torch",
-    "tqdm>=4.67.3",
 ]
 
 [project.optional-dependencies]
@@ -19,8 +18,12 @@ dev = [
 pythonpath = ["src"]
 testpaths = ["tests"]
 
+# Progress bars, run logging and evaluation plots. Each is imported behind a guard and
+# the code degrades with a message when it is absent, so none of them belongs in the
+# runtime dependencies above: scoring inserts from a checkpoint needs none of them.
 [dependency-groups]
 train = [
     "matplotlib>=3.10.8",
+    "tqdm>=4.67.3",
     "wandb>=0.25.1",
 ]
