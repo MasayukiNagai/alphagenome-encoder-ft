@@ -110,9 +110,25 @@ starts:
 | `lentimpra_construct()` | bare element, 200 bp | left adapter, right adapter, minP, barcode |
 | `lentimpra_promoter_barcode_construct()` | 230 bp with adapters inline | minP, barcode |
 
-The published Agarwal et al. 2025 TSVs are the second case, so their `seq` column needs the
-promoter-barcode preset. Passing those rows to `lentimpra_construct()` would add a second
-copy of the adapters and push the real element out of the window.
+The published Agarwal et al. 2025 TSVs are the second case: their `seq` column is 230 bp
+with the adapters inline. Two ways to handle that, and they produce byte-identical model
+input:
+
+```python
+# take the adapters off, so the insert is the bare element (what the drivers do)
+LentiMPRADataset(tsv, strip_adapters=True, construct=lentimpra_construct())
+
+# or leave seq alone and add only what is missing
+LentiMPRADataset(tsv, construct=lentimpra_promoter_barcode_construct())
+```
+
+Prefer the first. The insert is then the 200 bp element, so `predict_inserts` takes the
+sequence you designed with no adapter bookkeeping, and attribution returns one gradient row
+per element base instead of 30 constant adapter rows you have to remember to ignore.
+
+`strip_adapters` verifies rather than assumes: a row that does not carry the expected
+flanks raises and names itself. It defaults to off, because this reader is also used for
+files with the same columns but no adapters.
 
 The individual pieces live in `alphagenome_encoder_ft.constructs` rather than the top-level API, for composing a layout of your own, such as an ablation that drops the barcode:
 

@@ -10,8 +10,19 @@ import pytest
 import torch
 from alphagenome_pytorch.utils.sequence import onehot_to_sequence
 
-from alphagenome_encoder_ft.constructs import Construct
-from alphagenome_encoder_ft.data import DeepSTARRDataset, LentiMPRADataset, MPRADataset
+from alphagenome_encoder_ft.constructs import (
+    LENTIMPRA_LEFT_ADAPTER,
+    LENTIMPRA_RIGHT_ADAPTER,
+    Construct,
+    lentimpra_construct,
+    lentimpra_promoter_barcode_construct,
+)
+from alphagenome_encoder_ft.data import (
+    DeepSTARRDataset,
+    LentiMPRADataset,
+    MPRADataset,
+    strip_flanks,
+)
 
 
 def _decode(item: torch.Tensor) -> str:
@@ -201,3 +212,94 @@ def test_deepstarr_reader_applies_the_construct(deepstarr_tsv: Path):
 def test_deepstarr_reader_rejects_empty_target_columns(deepstarr_tsv: Path):
     with pytest.raises(ValueError, match="target_columns"):
         DeepSTARRDataset(deepstarr_tsv, split="train", target_columns=())
+
+
+# -------------------------
+# Adapter stripping
+# -------------------------
+
+
+ELEMENT = "ACGT" * 50  # 200 bp, as in the published tables
+
+
+@pytest.fixture
+def adapter_tsv(tmp_path: Path) -> Path:
+    """A miniature Agarwal-style table: seq is adapter + element + adapter, both strands."""
+
+    forward = LENTIMPRA_LEFT_ADAPTER + ELEMENT + LENTIMPRA_RIGHT_ADAPTER
+    reverse = _reverse_complement(forward)
+    return _write_tsv(
+        tmp_path / "adapters.tsv",
+        ["seq_id", "seq", "rev", "fold", "mean_value"],
+        [
+            {"seq_id": "peak1", "seq": forward, "rev": 0, "fold": 10, "mean_value": 1.0},
+            # the rev == 1 partner carries each adapter's reverse complement at the other end
+            {"seq_id": "peak1_Reversed:", "seq": reverse, "rev": 1, "fold": 10, "mean_value": 1.0},
+        ],
+    )
+
+
+def _reverse_complement(sequence: str) -> str:
+    return sequence[::-1].translate(str.maketrans("ACGT", "TGCA"))
+
+
+def test_strip_adapters_leaves_the_bare_element(adapter_tsv: Path):
+    ds = LentiMPRADataset(adapter_tsv, split="test", strip_adapters=True)
+    assert ds.inserts == [ELEMENT]
+    assert len(ds.inserts[0]) == 200
+
+
+def test_not_stripping_keeps_the_published_sequence(adapter_tsv: Path):
+    ds = LentiMPRADataset(adapter_tsv, split="test")  # default is off
+    assert len(ds.inserts[0]) == 230
+    assert ds.inserts[0].startswith(LENTIMPRA_LEFT_ADAPTER)
+
+
+def test_stripping_runs_after_the_rev_filter(adapter_tsv: Path):
+    """The rev == 1 rows carry reverse-complemented adapters; they must be gone first."""
+
+    ds = LentiMPRADataset(adapter_tsv, split="test", strip_adapters=True)
+    assert len(ds) == 1  # the reverse-complement partner was dropped, not stripped
+
+
+def test_stripping_and_the_full_construct_rebuild_the_same_model_input(adapter_tsv: Path):
+    """The whole point: where the boundary sits must not change what the model sees."""
+
+    stripped = LentiMPRADataset(
+        adapter_tsv, split="test", strip_adapters=True, construct=lentimpra_construct()
+    )
+    inline = LentiMPRADataset(
+        adapter_tsv, split="test", construct=lentimpra_promoter_barcode_construct()
+    )
+
+    torch.testing.assert_close(stripped[0][0], inline[0][0])
+    assert stripped[0][0].shape == (281, 4)
+
+
+def test_stripping_a_file_without_adapters_fails_loudly(lentimpra_tsv: Path):
+    with pytest.raises(ValueError, match="too short to carry"):
+        LentiMPRADataset(lentimpra_tsv, split="test", strip_adapters=True)
+
+
+def test_stripping_names_the_row_whose_flanks_are_wrong(tmp_path: Path):
+    path = _write_tsv(
+        tmp_path / "mixed.tsv",
+        ["seq_id", "seq", "rev", "fold", "mean_value"],
+        [
+            {
+                "seq_id": "oddball",
+                "seq": "T" * 15 + ELEMENT + LENTIMPRA_RIGHT_ADAPTER,
+                "rev": 0,
+                "fold": 10,
+                "mean_value": 1.0,
+            }
+        ],
+    )
+    with pytest.raises(ValueError, match="oddball"):
+        LentiMPRADataset(path, split="test", strip_adapters=True)
+
+
+def test_strip_flanks_is_reusable_on_plain_sequences():
+    assert strip_flanks(["AAtttGG"], "AA", "GG") == ["TTT"]
+    with pytest.raises(ValueError, match="does not carry the expected flanks"):
+        strip_flanks(["CCtttGG"], "AA", "GG")

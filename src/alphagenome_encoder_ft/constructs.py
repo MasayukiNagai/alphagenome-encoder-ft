@@ -18,16 +18,6 @@ from torch import Tensor
 
 from alphagenome_pytorch.utils.sequence import sequence_to_onehot_tensor
 
-# lentiMPRA (Agarwal et al. 2025) reporter pieces.
-LENTIMPRA_LEFT_ADAPTER = "AGGACCGGATCAACT"
-LENTIMPRA_RIGHT_ADAPTER = "CATTGCGTGAACCGA"
-LENTIMPRA_PROMOTER = "TCCATTATATACCCTCTAGTGTCGGTTCACGCAATG"
-LENTIMPRA_BARCODE = "AGAGACTGAGGCCAC"
-
-# Drosophila DeepSTARR library adapters (de Almeida et al. 2022).
-DEEPSTARR_ADAPTER_UP = "TCCCTACACGACGCTCTTCCGATCT"
-DEEPSTARR_ADAPTER_DOWN = "AGATCGGAAGAGCACACGTCTGAACT"
-
 
 def _encode(sequence: str) -> Tensor:
     if not sequence:
@@ -174,6 +164,11 @@ class Construct:
 # Assay presets
 # -------------------------
 
+# lentiMPRA (Agarwal et al. 2025) reporter pieces.
+LENTIMPRA_LEFT_ADAPTER = "AGGACCGGATCAACT"
+LENTIMPRA_RIGHT_ADAPTER = "CATTGCGTGAACCGA"
+LENTIMPRA_PROMOTER = "TCCATTATATACCCTCTAGTGTCGGTTCACGCAATG"
+LENTIMPRA_BARCODE = "AGAGACTGAGGCCAC"
 
 def lentimpra_construct() -> Construct:
     """The whole lentiMPRA reporter around a bare 200 bp element.
@@ -199,6 +194,11 @@ def lentimpra_promoter_barcode_construct() -> Construct:
     """
 
     return Construct(suffix=LENTIMPRA_PROMOTER + LENTIMPRA_BARCODE, length=281)
+
+
+# Drosophila DeepSTARR library adapters (de Almeida et al. 2022).
+DEEPSTARR_ADAPTER_UP = "TCCCTACACGACGCTCTTCCGATCT"
+DEEPSTARR_ADAPTER_DOWN = "AGATCGGAAGAGCACACGTCTGAACT"
 
 
 def deepstarr_construct() -> Construct:

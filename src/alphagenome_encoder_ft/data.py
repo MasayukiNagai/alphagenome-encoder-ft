@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from alphagenome_pytorch.utils.sequence import sequence_to_onehot
 
-from .constructs import Construct
+from .constructs import Construct, LENTIMPRA_LEFT_ADAPTER, LENTIMPRA_RIGHT_ADAPTER
 
 
 def _reverse_complement_onehot(onehot: np.ndarray) -> np.ndarray:
@@ -98,6 +98,39 @@ class MPRADataset(Dataset[tuple[Tensor, Tensor]]):
         return torch.from_numpy(np.ascontiguousarray(onehot)), torch.from_numpy(target)
 
 
+def strip_flanks(
+    sequences: Sequence[str],
+    prefix: str,
+    suffix: str,
+    *,
+    labels: Sequence[str] | None = None,
+) -> list[str]:
+    """Remove a known constant ``prefix`` and ``suffix`` from every sequence.
+
+    Verified, never assumed: a sequence that does not carry both raises, naming the row, so
+    an unexpected file fails loudly instead of silently losing real bases off the ends.
+    """
+
+    stripped: list[str] = []
+    for index, raw in enumerate(sequences):
+        sequence = str(raw).strip().upper()
+        label = labels[index] if labels is not None and index < len(labels) else str(index)
+        if len(sequence) <= len(prefix) + len(suffix):
+            raise ValueError(
+                f"Sequence {label!r} is {len(sequence)} bp, too short to carry "
+                f"{len(prefix)} + {len(suffix)} bp of flanks"
+            )
+        if not sequence.startswith(prefix) or not sequence.endswith(suffix):
+            raise ValueError(
+                f"Sequence {label!r} does not carry the expected flanks: it starts "
+                f"{sequence[: len(prefix)]!r} and ends {sequence[-len(suffix):]!r}, expected "
+                f"{prefix!r} and {suffix!r}. Pass strip_adapters=False if this file stores "
+                "inserts without them."
+            )
+        stripped.append(sequence[len(prefix) : len(sequence) - len(suffix)])
+    return stripped
+
+
 def read_tsv_rows(path: str | Path, keep: Callable[[dict[str, str]], bool] | None = None) -> list[dict[str, str]]:
     """Read a TSV with a header into dicts, optionally keeping only rows where ``keep`` is true."""
 
@@ -114,6 +147,16 @@ class LentiMPRADataset(MPRADataset):
 
     Keeps ``rev == 0`` rows (the ``rev == 1`` partners are exact reverse complements with the
     same target; RC is applied as an augmentation instead) and selects folds by split.
+
+    ``strip_adapters`` removes the 15 bp cloning adapters that the published Agarwal et al.
+    2025 TSVs carry inline, leaving the bare 200 bp element as the insert. Pair it with
+    :func:`~alphagenome_encoder_ft.constructs.lentimpra_construct`, which puts them back;
+    leave it off and pair with
+    :func:`~alphagenome_encoder_ft.constructs.lentimpra_promoter_barcode_construct`, which
+    expects them already present. Either way the model input is the same 281 bp.
+
+    It is off by default because this reader is also used for files with the same columns
+    but no adapters, such as a pre-assembled construct.
     """
 
     DEFAULT_FOLD_SPLITS = {
@@ -132,6 +175,9 @@ class LentiMPRADataset(MPRADataset):
         test_folds: Sequence[int] | None = None,
         sequence_column: str = "seq",
         target_column: str = "mean_value",
+        strip_adapters: bool = False,
+        left_adapter: str = LENTIMPRA_LEFT_ADAPTER,
+        right_adapter: str = LENTIMPRA_RIGHT_ADAPTER,
         **kwargs,
     ) -> None:
         if split not in self.DEFAULT_FOLD_SPLITS:
@@ -149,8 +195,22 @@ class LentiMPRADataset(MPRADataset):
             self.input_tsv,
             keep=lambda row: int(row["rev"]) == 0 and int(row["fold"]) in fold_set,
         )
+        inserts = [row[sequence_column] for row in rows]
+        if strip_adapters:
+            # Only the kept rows are checked, and that is the point: the rev == 1 rows are
+            # the reverse complement of the whole molecule, so they carry the reverse
+            # complement of each adapter at the opposite end. They are already filtered out
+            # above, and every remaining row carries the adapters in forward orientation.
+            inserts = strip_flanks(
+                inserts,
+                left_adapter,
+                right_adapter,
+                labels=[row.get("seq_id", str(index)) for index, row in enumerate(rows)],
+            )
+        self.strip_adapters = strip_adapters
+
         super().__init__(
-            [row[sequence_column] for row in rows],
+            inserts,
             [float(row[target_column]) for row in rows],
             **kwargs,
         )
