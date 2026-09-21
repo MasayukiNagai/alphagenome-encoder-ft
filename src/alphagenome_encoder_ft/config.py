@@ -80,6 +80,7 @@ class HeadConfig:
     activation: str = "relu"
     head_type: str = "mpra"
     num_outputs: int = 1
+    norm_type: str = "layer"
 
     def __post_init__(self) -> None:
         self.hidden_sizes = parse_hidden_sizes(self.hidden_sizes)
@@ -95,6 +96,8 @@ class HeadConfig:
             raise ValueError("head.head_type must be one of mpra, deepstarr")
         if self.num_outputs < 1:
             raise ValueError("head.num_outputs must be >= 1")
+        if self.norm_type not in {"layer", "batch", "group", "none"}:
+            raise ValueError("head.norm_type must be one of layer, batch, group, none")
 
 
 @dataclass
@@ -216,6 +219,7 @@ class TrainConfig:
             "dropout": self.head.dropout,
             "activation": self.head.activation,
             "num_outputs": self.head.num_outputs,
+            "norm_type": self.head.norm_type,
         }
 
     @classmethod

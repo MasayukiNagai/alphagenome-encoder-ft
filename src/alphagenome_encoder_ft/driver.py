@@ -59,6 +59,7 @@ _SECTION_FLAGS: dict[str, list[tuple[str, dict[str, Any]]]] = {
         ("activation", {"type": str, "choices": ["relu", "gelu"]}),
         ("head_type", {"type": str, "choices": ["mpra", "deepstarr"]}),
         ("num_outputs", {"type": int}),
+        ("norm_type", {"type": str, "choices": ["layer", "batch", "group", "none"]}),
     ],
     "optim": [
         ("optimizer", {"type": str, "choices": ["adam", "adamw"]}),

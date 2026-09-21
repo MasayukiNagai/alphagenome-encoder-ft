@@ -9,8 +9,14 @@ import torch
 import torch.nn as nn
 
 PoolingType = Literal["flatten", "center", "mean", "sum", "max"]
+NormType = Literal["layer", "batch", "group", "none"]
 ENCODER_RESOLUTION_BP = 128
 ENCODER_DIM = 1536
+NORM_GROUPS = 8
+
+# Norms that normalize over a channel dimension and therefore need (B, D, L) rather than
+# the (B, L, D) the encoder emits.
+_CHANNELS_FIRST_NORMS = {"batch", "group"}
 
 
 def _parse_hidden_sizes(hidden_sizes: int | Sequence[int]) -> list[int]:
@@ -31,6 +37,23 @@ def _make_activation(name: str) -> nn.Module:
     if name == "gelu":
         return nn.GELU()
     raise ValueError("activation must be 'relu' or 'gelu'")
+
+def _make_norm(norm_type: str | None, channels: int, num_groups: int = NORM_GROUPS) -> nn.Module:
+    """Normalization applied to the encoder output, over its ``channels`` dimension."""
+
+    norm_type = "none" if norm_type is None else norm_type.lower()
+    if norm_type == "layer":
+        return nn.LayerNorm(channels)
+    if norm_type == "batch":
+        return nn.BatchNorm1d(channels)
+    if norm_type == "group":
+        groups = min(num_groups, channels)
+        while groups > 1 and channels % groups != 0:
+            groups -= 1
+        return nn.GroupNorm(groups, channels)
+    if norm_type == "none":
+        return nn.Identity()
+    raise ValueError(f"Unsupported norm_type: {norm_type}")
 
 
 class MPRAHead(nn.Module):
@@ -59,6 +82,15 @@ class MPRAHead(nn.Module):
       reduces over a centered window of positions. The window size is
       ``max(1, center_bp // 128)`` because encoder features are at 128 bp
       resolution.
+
+    ``norm_type`` selects the normalization applied to the encoder output before the MLP:
+
+    - ``layer`` (default): ``LayerNorm(1536)`` over the channel dimension, per position.
+      Independent of batch composition, which is why it is the default.
+    - ``batch``: ``BatchNorm1d(1536)`` over batch and position per channel. Keeps running
+      statistics, so predictions depend on batch composition during training.
+    - ``group``: ``GroupNorm(8, 1536)``, between the two.
+    - ``none``: no normalization (``Identity``), for feeding the encoder output straight in.
     """
 
     def __init__(
@@ -69,6 +101,7 @@ class MPRAHead(nn.Module):
         dropout: float | None = 0.1,
         activation: Literal["relu", "gelu"] = "relu",
         num_outputs: int = 1,
+        norm_type: NormType = "layer",
     ) -> None:
         super().__init__()
         if pooling_type not in {"flatten", "center", "mean", "sum", "max"}:
@@ -86,7 +119,8 @@ class MPRAHead(nn.Module):
         self.dropout = dropout
         self.activation = activation
         self.num_outputs = int(num_outputs)
-        self.norm = nn.LayerNorm(ENCODER_DIM)
+        self.norm_type = "none" if norm_type is None else str(norm_type).lower()
+        self.norm = _make_norm(self.norm_type, ENCODER_DIM)
         self.hidden_layers = nn.ModuleList()
         in_features: int | None = None
         for hidden_size in self.hidden_sizes:
@@ -108,6 +142,10 @@ class MPRAHead(nn.Module):
         x = encoder_output
         if x.ndim == 3 and x.shape[-1] != ENCODER_DIM and x.shape[1] == ENCODER_DIM:
             x = x.transpose(1, 2)
+        # LayerNorm and Identity act on the last dimension, which is already the channel
+        # dimension. BatchNorm1d and GroupNorm act on dim 1, so they need (B, D, L).
+        if x.ndim == 3 and self.norm_type in _CHANNELS_FIRST_NORMS:
+            return self.norm(x.transpose(1, 2)).transpose(1, 2)
         return self.norm(x)
 
     def _pool_predictions(self, preds: torch.Tensor) -> torch.Tensor:
@@ -164,6 +202,7 @@ class DeepSTARRHead(MPRAHead):
         dropout: float | None = 0.5,
         activation: Literal["relu", "gelu"] = "relu",
         num_outputs: int = 2,
+        norm_type: NormType = "layer",
     ) -> None:
         super().__init__(
             pooling_type=pooling_type,
@@ -172,4 +211,5 @@ class DeepSTARRHead(MPRAHead):
             dropout=dropout,
             activation=activation,
             num_outputs=num_outputs,
+            norm_type=norm_type,
         )

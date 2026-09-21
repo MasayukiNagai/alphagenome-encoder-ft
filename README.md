@@ -28,7 +28,18 @@ effect = model.predict_inserts([alt_insert]) - model.predict_inserts([ref_insert
 | `mpra` (default) | `MPRAHead` | 1 scalar per sequence | lentiMPRA-style scalar regression |
 | `deepstarr` | `DeepSTARRHead` | 2 scalars per sequence (dev, hk) | Drosophila STARR-seq dual-output regression |
 
-Both heads share the same pooling modes (`flatten`, `center`, `mean`, `sum`, `max`) and the same `LayerNorm → MLP → Linear` layout; `DeepSTARRHead` is a subclass of `MPRAHead` whose only functional difference is `num_outputs=2`. Checkpoints persist `head_type` so `from_checkpoint(...)` dispatches to the right class.
+Both heads share the same pooling modes (`flatten`, `center`, `mean`, `sum`, `max`) and the same `norm → MLP → Linear` layout; `DeepSTARRHead` is a subclass of `MPRAHead` whose only functional difference is `num_outputs=2`. Checkpoints persist `head_type` so `from_checkpoint(...)` dispatches to the right class.
+
+`norm_type` selects the normalization applied to the encoder output before the MLP:
+
+| `norm_type` | Module | Normalizes over |
+|---|---|---|
+| `layer` (default) | `LayerNorm(1536)` | channels, per position; independent of batch composition |
+| `batch` | `BatchNorm1d(1536)` | batch and position, per channel; keeps running statistics |
+| `group` | `GroupNorm(8, 1536)` | channel groups, per position |
+| `none` | `Identity` | nothing |
+
+`batch` and `group` normalize over a channel dimension, so the head transposes to `(B, D, L)` for them and back afterwards; `layer` and `none` act on the last dimension directly. The default stays `layer`, which is what earlier checkpoints were trained with and keeps their `norm.weight` / `norm.bias` keys loading unchanged.
 
 ## Installation
 
