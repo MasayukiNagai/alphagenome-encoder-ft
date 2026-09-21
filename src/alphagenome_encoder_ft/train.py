@@ -1,4 +1,10 @@
-"""Reusable encoder-only training primitives."""
+"""Training primitives: the epoch loop, evaluation, checkpointing and the two-stage schedule.
+
+Library level. Everything here takes a model, data loaders and a :class:`TrainConfig` that
+the caller already built, so it can be driven from a notebook or an analysis script as
+easily as from a command line. Turning command-line arguments and config files into those
+objects, and laying out a run directory around them, is :mod:`alphagenome_encoder_ft.cli`.
+"""
 
 from __future__ import annotations
 
@@ -20,6 +26,7 @@ except ImportError:
     tqdm = None
 
 from .config import OptimConfig, TrainConfig
+from .metrics import per_track, pearsonr
 from .model import AlphaGenomeEncoderModel
 
 
@@ -33,36 +40,12 @@ def _default_loss_fn(preds: Tensor, targets: Tensor) -> Tensor:
     return F.mse_loss(preds.float(), targets.float())
 
 
-def _pearson_r(preds: Tensor, targets: Tensor, eps: float = 1e-8) -> Tensor:
-    preds = preds.float()
-    targets = targets.float()
-    if preds.numel() < 2:
-        return torch.tensor(float("nan"), device=preds.device)
-    preds_centered = preds - preds.mean()
-    targets_centered = targets - targets.mean()
-    denom = preds_centered.pow(2).sum().sqrt() * targets_centered.pow(2).sum().sqrt()
-    return (preds_centered * targets_centered).sum() / (denom + eps)
-
-
-# per-track pearson when preds/targets are (N, K); returns one scalar per track.
-def _pearson_r_per_track(preds: Tensor, targets: Tensor, eps: float = 1e-8) -> list[float]:
-    if preds.ndim != 2 or targets.ndim != 2 or preds.shape[1] < 2:
-        return []
-    preds = preds.float()
-    targets = targets.float()
-    scores: list[float] = []
-    for track in range(preds.shape[1]):
-        r = _pearson_r(preds[:, track], targets[:, track], eps=eps)
-        scores.append(float(r.detach().cpu().item()))
-    return scores
-
-
 def _compute_metrics(
     preds: Tensor,
     targets: Tensor,
     metric_fns: dict[str, Callable[[Tensor, Tensor], Tensor | float]] | None,
 ) -> dict[str, float]:
-    functions = metric_fns or {"pearson": _pearson_r}
+    functions = metric_fns or {"pearson": pearsonr}
     metrics: dict[str, float] = {}
     for name, fn in functions.items():
         value = fn(preds, targets)
@@ -71,8 +54,7 @@ def _compute_metrics(
         metrics[name] = float(value)
 
     # multi-output heads (e.g. DeepSTARR dev+hk): also report per-track pearson.
-    per_track = _pearson_r_per_track(preds, targets)
-    for idx, score in enumerate(per_track):
+    for idx, score in enumerate(per_track(pearsonr, preds, targets)):
         metrics[f"pearson_track{idx}"] = score
     return metrics
 
