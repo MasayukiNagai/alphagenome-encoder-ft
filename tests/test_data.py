@@ -10,18 +10,15 @@ import pytest
 import torch
 from alphagenome_pytorch.utils.sequence import onehot_to_sequence
 
-from alphagenome_encoder_ft.constructs import (
-    LENTIMPRA_LEFT_ADAPTER,
-    LENTIMPRA_RIGHT_ADAPTER,
-    Construct,
-    lentimpra_construct,
-)
+from alphagenome_encoder_ft.constructs import Construct, LentiMPRAAgarwal2025Library
 from alphagenome_encoder_ft.data import (
-    DeepSTARRDataset,
-    LentiMPRADataset,
+    DeepSTARRDeAlmeida2022Dataset,
+    LentiMPRAAgarwal2025Dataset,
     MPRADataset,
     strip_flanks,
 )
+
+AGARWAL = LentiMPRAAgarwal2025Library
 
 
 def _decode(item: torch.Tensor) -> str:
@@ -143,7 +140,7 @@ def test_validation_of_numeric_arguments():
 def _published(element: str) -> str:
     """A seq column value: the element between the two cloning adapters."""
 
-    return LENTIMPRA_LEFT_ADAPTER + element + LENTIMPRA_RIGHT_ADAPTER
+    return AGARWAL.LEFT_ADAPTER + element + AGARWAL.RIGHT_ADAPTER
 
 
 @pytest.fixture
@@ -161,32 +158,32 @@ def lentimpra_tsv(tmp_path: Path) -> Path:
 
 
 def test_lentimpra_reader_filters_split_and_reverse_rows(lentimpra_tsv: Path):
-    assert len(LentiMPRADataset(lentimpra_tsv, split="train")) == 1
-    assert len(LentiMPRADataset(lentimpra_tsv, split="val")) == 1
+    assert len(LentiMPRAAgarwal2025Dataset(lentimpra_tsv, split="train")) == 1
+    assert len(LentiMPRAAgarwal2025Dataset(lentimpra_tsv, split="val")) == 1
     # fold 10 has two rows but one is rev == 1.
-    test_ds = LentiMPRADataset(lentimpra_tsv, split="test")
+    test_ds = LentiMPRAAgarwal2025Dataset(lentimpra_tsv, split="test")
     assert len(test_ds) == 1
     assert test_ds.inserts == ["CC"]
 
 
 def test_lentimpra_reader_honours_custom_folds(lentimpra_tsv: Path):
-    ds = LentiMPRADataset(lentimpra_tsv, split="train", train_folds=[1, 2])
+    ds = LentiMPRAAgarwal2025Dataset(lentimpra_tsv, split="train", train_folds=[1, 2])
     assert sorted(ds.inserts) == ["AC", "GT"]
 
 
 def test_lentimpra_reader_passes_the_construct_through(lentimpra_tsv: Path):
-    ds = LentiMPRADataset(lentimpra_tsv, split="test", construct=Construct(suffix="GG", length=4))
+    ds = LentiMPRAAgarwal2025Dataset(lentimpra_tsv, split="test", construct=Construct(suffix="GG", length=4))
     assert _decode(ds[0][0]) == "CCGG"
 
 
 def test_lentimpra_reader_rejects_an_unknown_split(lentimpra_tsv: Path):
     with pytest.raises(ValueError, match="Unknown split"):
-        LentiMPRADataset(lentimpra_tsv, split="holdout")
+        LentiMPRAAgarwal2025Dataset(lentimpra_tsv, split="holdout")
 
 
 def test_reader_reports_a_missing_file(tmp_path: Path):
     with pytest.raises(FileNotFoundError, match="Dataset file not found"):
-        LentiMPRADataset(tmp_path / "absent.tsv", split="train")
+        LentiMPRAAgarwal2025Dataset(tmp_path / "absent.tsv", split="train")
 
 
 @pytest.fixture
@@ -202,7 +199,7 @@ def deepstarr_tsv(tmp_path: Path) -> Path:
 
 
 def test_deepstarr_reader_selects_the_split_and_two_targets(deepstarr_tsv: Path):
-    ds = DeepSTARRDataset(deepstarr_tsv, split="test")
+    ds = DeepSTARRDeAlmeida2022Dataset(deepstarr_tsv, split="test")
     assert len(ds) == 1
     onehot, target = ds[0]
     assert _decode(onehot) == "GT"
@@ -210,13 +207,13 @@ def test_deepstarr_reader_selects_the_split_and_two_targets(deepstarr_tsv: Path)
 
 
 def test_deepstarr_reader_applies_the_construct(deepstarr_tsv: Path):
-    ds = DeepSTARRDataset(deepstarr_tsv, split="train", construct=Construct(prefix="TT", suffix="AA", length=6))
+    ds = DeepSTARRDeAlmeida2022Dataset(deepstarr_tsv, split="train", construct=Construct(prefix="TT", suffix="AA", length=6))
     assert _decode(ds[0][0]) == "TTACAA"
 
 
 def test_deepstarr_reader_rejects_empty_target_columns(deepstarr_tsv: Path):
     with pytest.raises(ValueError, match="target_columns"):
-        DeepSTARRDataset(deepstarr_tsv, split="train", target_columns=())
+        DeepSTARRDeAlmeida2022Dataset(deepstarr_tsv, split="train", target_columns=())
 
 
 # -------------------------
@@ -231,7 +228,7 @@ ELEMENT = "ACGT" * 50  # 200 bp, as in the published tables
 def adapter_tsv(tmp_path: Path) -> Path:
     """A miniature Agarwal-style table: seq is adapter + element + adapter, both strands."""
 
-    forward = LENTIMPRA_LEFT_ADAPTER + ELEMENT + LENTIMPRA_RIGHT_ADAPTER
+    forward = AGARWAL.LEFT_ADAPTER + ELEMENT + AGARWAL.RIGHT_ADAPTER
     reverse = _reverse_complement(forward)
     return _write_tsv(
         tmp_path / "adapters.tsv",
@@ -249,7 +246,7 @@ def _reverse_complement(sequence: str) -> str:
 
 
 def test_the_insert_is_the_element(adapter_tsv: Path):
-    ds = LentiMPRADataset(adapter_tsv, split="test")
+    ds = LentiMPRAAgarwal2025Dataset(adapter_tsv, split="test")
     assert ds.inserts == [ELEMENT]
     assert len(ds.inserts[0]) == 200
 
@@ -257,16 +254,16 @@ def test_the_insert_is_the_element(adapter_tsv: Path):
 def test_the_reverse_complement_rows_are_dropped_before_stripping(adapter_tsv: Path):
     """They carry each adapter's reverse complement at the opposite end."""
 
-    assert len(LentiMPRADataset(adapter_tsv, split="test")) == 1
+    assert len(LentiMPRAAgarwal2025Dataset(adapter_tsv, split="test")) == 1
 
 
 def test_the_construct_rebuilds_the_published_sequence(adapter_tsv: Path):
-    ds = LentiMPRADataset(adapter_tsv, split="test", construct=lentimpra_construct())
+    ds = LentiMPRAAgarwal2025Dataset(adapter_tsv, split="test", construct=AGARWAL.construct())
     onehot = ds[0][0]
 
     assert onehot.shape == (281, 4)
     # the first 230 bp are the seq column as published
-    assert _decode(onehot)[:230] == LENTIMPRA_LEFT_ADAPTER + ELEMENT + LENTIMPRA_RIGHT_ADAPTER
+    assert _decode(onehot)[:230] == AGARWAL.LEFT_ADAPTER + ELEMENT + AGARWAL.RIGHT_ADAPTER
 
 
 def test_a_file_without_adapters_fails_loudly(tmp_path: Path):
@@ -276,7 +273,7 @@ def test_a_file_without_adapters_fails_loudly(tmp_path: Path):
         [{"seq": "AC", "rev": 0, "fold": 10, "mean_value": 1.0}],
     )
     with pytest.raises(ValueError, match="too short to carry"):
-        LentiMPRADataset(path, split="test")
+        LentiMPRAAgarwal2025Dataset(path, split="test")
 
 
 def test_a_row_with_wrong_flanks_is_named(tmp_path: Path):
@@ -286,7 +283,7 @@ def test_a_row_with_wrong_flanks_is_named(tmp_path: Path):
         [
             {
                 "seq_id": "oddball",
-                "seq": "T" * 15 + ELEMENT + LENTIMPRA_RIGHT_ADAPTER,
+                "seq": "T" * 15 + ELEMENT + AGARWAL.RIGHT_ADAPTER,
                 "rev": 0,
                 "fold": 10,
                 "mean_value": 1.0,
@@ -294,7 +291,7 @@ def test_a_row_with_wrong_flanks_is_named(tmp_path: Path):
         ],
     )
     with pytest.raises(ValueError, match="oddball"):
-        LentiMPRADataset(path, split="test")
+        LentiMPRAAgarwal2025Dataset(path, split="test")
 
 
 def test_strip_flanks_is_reusable_on_plain_sequences():

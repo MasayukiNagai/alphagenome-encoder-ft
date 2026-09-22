@@ -11,7 +11,7 @@ import argparse
 from pathlib import Path
 from typing import Any
 
-from alphagenome_encoder_ft import Construct, LentiMPRADataset
+from alphagenome_encoder_ft import Construct, LentiMPRAAgarwal2025Dataset
 from alphagenome_encoder_ft.cli import (
     add_evaluate_arguments,
     evaluate_checkpoint,
@@ -20,7 +20,7 @@ from alphagenome_encoder_ft.cli import (
 )
 
 
-def check_insert_length(construct: Construct | None, dataset: LentiMPRADataset) -> None:
+def check_insert_length(construct: Construct | None, dataset: LentiMPRAAgarwal2025Dataset) -> None:
     """The construct must close exactly around the element, with nothing trimmed or padded."""
 
     if construct is None or construct.length is None or not len(dataset):
@@ -44,8 +44,8 @@ def main() -> dict[str, Any]:
         parser.error(f"Checkpoint not found: {checkpoint_path}")
     input_tsv = resolve_input_tsv(parser, args, checkpoint_path)
 
-    def make_test_dataset(construct: Construct | None) -> LentiMPRADataset:
-        dataset = LentiMPRADataset(input_tsv, split="test", construct=construct)
+    def make_test_dataset(construct: Construct | None) -> LentiMPRAAgarwal2025Dataset:
+        dataset = LentiMPRAAgarwal2025Dataset(input_tsv, split="test", construct=construct)
         check_insert_length(construct, dataset)
         return dataset
 

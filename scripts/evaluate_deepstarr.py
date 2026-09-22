@@ -7,7 +7,7 @@ import argparse
 from pathlib import Path
 from typing import Any
 
-from alphagenome_encoder_ft import Construct, DeepSTARRDataset
+from alphagenome_encoder_ft import Construct, DeepSTARRDeAlmeida2022Dataset
 from alphagenome_encoder_ft.cli import (
     add_evaluate_arguments,
     evaluate_checkpoint,
@@ -29,8 +29,8 @@ def main() -> dict[str, Any]:
     input_tsv = resolve_input_tsv(parser, args, checkpoint_path)
     metadata = load_run_metadata(checkpoint_path)
 
-    def make_test_dataset(construct: Construct | None) -> DeepSTARRDataset:
-        return DeepSTARRDataset(
+    def make_test_dataset(construct: Construct | None) -> DeepSTARRDeAlmeida2022Dataset:
+        return DeepSTARRDeAlmeida2022Dataset(
             input_tsv,
             split=args.split,
             split_column=metadata.get("split_column", "set"),

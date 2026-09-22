@@ -161,34 +161,44 @@ class Construct:
 
 
 # -------------------------
-# Assay presets
+# Published libraries
 # -------------------------
-
-# lentiMPRA (Agarwal et al. 2025) reporter pieces.
-LENTIMPRA_LEFT_ADAPTER = "AGGACCGGATCAACT"
-LENTIMPRA_RIGHT_ADAPTER = "CATTGCGTGAACCGA"
-LENTIMPRA_PROMOTER = "TCCATTATATACCCTCTAGTGTCGGTTCACGCAATG"
-LENTIMPRA_BARCODE = "AGAGACTGAGGCCAC"
-
-def lentimpra_construct() -> Construct:
-    """The lentiMPRA reporter around a 200 bp element.
-
-    ``left adapter + element + right adapter + minP + barcode``, 281 bp in total.
-    """
-
-    return Construct(
-        prefix=LENTIMPRA_LEFT_ADAPTER,
-        suffix=LENTIMPRA_RIGHT_ADAPTER + LENTIMPRA_PROMOTER + LENTIMPRA_BARCODE,
-        length=281,
-    )
+#
+# One class per assayed library: the fixed pieces of its reporter, and the Construct that
+# assembles them around an insert. The pieces are specific to the library, not to the assay
+# type, so each is keyed by its publication.
 
 
-# Drosophila DeepSTARR library adapters (de Almeida et al. 2022).
-DEEPSTARR_ADAPTER_UP = "TCCCTACACGACGCTCTTCCGATCT"
-DEEPSTARR_ADAPTER_DOWN = "AGATCGGAAGAGCACACGTCTGAACT"
+class LentiMPRAAgarwal2025Library:
+    """Reporter design of the lentiMPRA library in Agarwal et al. 2025 (K562, HepG2, WTC11)."""
+
+    LEFT_ADAPTER = "AGGACCGGATCAACT"
+    RIGHT_ADAPTER = "CATTGCGTGAACCGA"
+    PROMOTER = "TCCATTATATACCCTCTAGTGTCGGTTCACGCAATG"
+    BARCODE = "AGAGACTGAGGCCAC"
+    ELEMENT_BP = 200
+    INPUT_BP = 281
+
+    @classmethod
+    def construct(cls) -> Construct:
+        """``left adapter + element + right adapter + minP + barcode``."""
+
+        return Construct(
+            prefix=cls.LEFT_ADAPTER,
+            suffix=cls.RIGHT_ADAPTER + cls.PROMOTER + cls.BARCODE,
+            length=cls.INPUT_BP,
+        )
 
 
-def deepstarr_construct() -> Construct:
-    """Drosophila DeepSTARR: STARR-seq adapters around a ~249 bp insert, windowed to 256 bp."""
+class DeepSTARRDeAlmeida2022Library:
+    """Reporter design of the Drosophila STARR-seq library in de Almeida et al. 2022."""
 
-    return Construct(prefix=DEEPSTARR_ADAPTER_UP, suffix=DEEPSTARR_ADAPTER_DOWN, length=256)
+    ADAPTER_UP = "TCCCTACACGACGCTCTTCCGATCT"
+    ADAPTER_DOWN = "AGATCGGAAGAGCACACGTCTGAACT"
+    INPUT_BP = 256
+
+    @classmethod
+    def construct(cls) -> Construct:
+        """``adapter + insert + adapter``, windowed to 256 bp."""
+
+        return Construct(prefix=cls.ADAPTER_UP, suffix=cls.ADAPTER_DOWN, length=cls.INPUT_BP)

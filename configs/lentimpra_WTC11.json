@@ -2,7 +2,7 @@
   "_comment": [
     "LentiMPRA WTC11. Training hyperparameters only.",
     "The dataset file and the reporter construct are not config: pass --input_tsv and let",
-    "train_lentimpra.py build lentimpra_construct(), or override it with",
+    "train_lentimpra.py build LentiMPRAAgarwal2025Library.construct(), or override it with",
     "--construct_prefix / --construct_suffix / --construct_length / --no-construct."
   ],
   "data": {

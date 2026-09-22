@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 from typing import Any
 
-from alphagenome_encoder_ft import LentiMPRADataset, lentimpra_construct
+from alphagenome_encoder_ft import LentiMPRAAgarwal2025Dataset, LentiMPRAAgarwal2025Library
 from alphagenome_encoder_ft.cli import (
     add_construct_arguments,
     add_train_arguments,
@@ -34,10 +34,10 @@ def main() -> dict[str, Any]:
     parser = build_arg_parser()
     args = parser.parse_args()
     config = load_config(parser, args)
-    construct = resolve_construct(args, lentimpra_construct())
+    construct = resolve_construct(args, LentiMPRAAgarwal2025Library.construct())
 
-    def make_dataset(split: str) -> LentiMPRADataset:
-        return LentiMPRADataset(
+    def make_dataset(split: str) -> LentiMPRAAgarwal2025Dataset:
+        return LentiMPRAAgarwal2025Dataset(
             args.input_tsv,
             split=split,
             construct=construct,

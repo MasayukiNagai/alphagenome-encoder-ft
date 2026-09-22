@@ -14,13 +14,14 @@ __all__ = [
     "merge_train_config",
     "parse_hidden_sizes",
     "MPRADataset",
-    "LentiMPRADataset",
-    "DeepSTARRDataset",
+    "LentiMPRAAgarwal2025Dataset",
+    "DeepSTARRDeAlmeida2022Dataset",
     "read_tsv_rows",
+    "strip_flanks",
     "create_dataloader",
     "Construct",
-    "lentimpra_construct",
-    "deepstarr_construct",
+    "LentiMPRAAgarwal2025Library",
+    "DeepSTARRDeAlmeida2022Library",
     "AlphaGenomeEncoderModel",
     "MPRAHead",
     "DeepSTARRHead",
@@ -38,14 +39,18 @@ __all__ = [
 
 _MODULE_BY_NAME = {
     **dict.fromkeys(
-        ["MPRADataset", "LentiMPRADataset", "DeepSTARRDataset", "read_tsv_rows", "create_dataloader"],
+        [
+            "MPRADataset",
+            "LentiMPRAAgarwal2025Dataset",
+            "DeepSTARRDeAlmeida2022Dataset",
+            "read_tsv_rows",
+            "strip_flanks",
+            "create_dataloader",
+        ],
         "data",
     ),
-    # The individual reporter pieces (LENTIMPRA_PROMOTER and friends) stay in
-    # alphagenome_encoder_ft.constructs rather than the top-level API: they are building
-    # blocks for composing a custom layout, not part of the curated surface.
     **dict.fromkeys(
-        ["Construct", "lentimpra_construct", "deepstarr_construct"],
+        ["Construct", "LentiMPRAAgarwal2025Library", "DeepSTARRDeAlmeida2022Library"],
         "constructs",
     ),
     **dict.fromkeys(

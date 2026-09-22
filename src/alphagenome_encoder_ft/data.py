@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from alphagenome_pytorch.utils.sequence import sequence_to_onehot
 
-from .constructs import Construct, LENTIMPRA_LEFT_ADAPTER, LENTIMPRA_RIGHT_ADAPTER
+from .constructs import Construct, DeepSTARRDeAlmeida2022Library, LentiMPRAAgarwal2025Library
 
 
 def _reverse_complement_onehot(onehot: np.ndarray) -> np.ndarray:
@@ -141,17 +141,18 @@ def read_tsv_rows(path: str | Path, keep: Callable[[dict[str, str]], bool] | Non
         return [row for row in reader if keep is None or keep(row)]
 
 
-class LentiMPRADataset(MPRADataset):
-    """Reader for lentiMPRA TSVs (``seq``, ``mean_value``, ``fold``, ``rev``).
+class LentiMPRAAgarwal2025Dataset(MPRADataset):
+    """Reader for the Agarwal et al. 2025 lentiMPRA tables (``seq``, ``mean_value``, ``fold``, ``rev``).
 
     Keeps ``rev == 0`` rows (the ``rev == 1`` partners are exact reverse complements with the
     same target; RC is applied as an augmentation instead) and selects folds by split.
 
     ``seq`` is 230 bp: a 200 bp element between the two 15 bp cloning adapters. The adapters
-    come off here, so the insert is the element, and
-    :func:`~alphagenome_encoder_ft.constructs.lentimpra_construct` rebuilds the 281 bp
-    reporter around it.
+    come off here, so the insert is the element, and ``LIBRARY.construct()`` rebuilds the
+    281 bp reporter around it.
     """
+
+    LIBRARY = LentiMPRAAgarwal2025Library
 
     DEFAULT_FOLD_SPLITS = {
         "train": [2, 3, 4, 5, 6, 7, 8, 9],
@@ -191,8 +192,8 @@ class LentiMPRADataset(MPRADataset):
         # filter above, never before.
         inserts = strip_flanks(
             [row[sequence_column] for row in rows],
-            LENTIMPRA_LEFT_ADAPTER,
-            LENTIMPRA_RIGHT_ADAPTER,
+            self.LIBRARY.LEFT_ADAPTER,
+            self.LIBRARY.RIGHT_ADAPTER,
             labels=[row.get("seq_id", str(index)) for index, row in enumerate(rows)],
         )
         super().__init__(
@@ -202,8 +203,10 @@ class LentiMPRADataset(MPRADataset):
         )
 
 
-class DeepSTARRDataset(MPRADataset):
-    """Reader for Drosophila DeepSTARR TSVs with a split column and two log2 targets (dev, hk)."""
+class DeepSTARRDeAlmeida2022Dataset(MPRADataset):
+    """Reader for the de Almeida et al. 2022 table: a split column and two log2 targets (dev, hk)."""
+
+    LIBRARY = DeepSTARRDeAlmeida2022Library
 
     DEFAULT_TARGET_COLUMNS = ("Dev_log2_enrichment", "Hk_log2_enrichment")
 

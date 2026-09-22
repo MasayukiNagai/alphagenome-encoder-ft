@@ -90,32 +90,33 @@ prefix + insert + suffix = 10 bp, length=13  ->  pad  1 left, 2 right
 
 ### Presets
 
-```python
-from alphagenome_encoder_ft import lentimpra_construct, deepstarr_construct
+Each published library is a class holding its reporter pieces and the construct that
+assembles them:
 
-lentimpra_construct()   # adapters + element + minP + barcode -> 281 bp
-deepstarr_construct()   # STARR-seq adapters around the insert -> 256 bp
+```python
+from alphagenome_encoder_ft import LentiMPRAAgarwal2025Library, DeepSTARRDeAlmeida2022Library
+
+LentiMPRAAgarwal2025Library.construct()      # adapters + element + minP + barcode -> 281 bp
+DeepSTARRDeAlmeida2022Library.construct()    # STARR-seq adapters around the insert -> 256 bp
 ```
 
-| preset | insert | model input |
+| library | insert | model input |
 |---|---|---|
-| `lentimpra_construct()` | 200 bp element | 281 bp |
-| `deepstarr_construct()` | ~249 bp insert | 256 bp |
+| `LentiMPRAAgarwal2025Library` | 200 bp element | 281 bp |
+| `DeepSTARRDeAlmeida2022Library` | ~249 bp insert | 256 bp |
 
-`LentiMPRADataset` takes the cloning adapters off the published `seq` column, so the insert
-it yields is the element this preset expects. A row whose flanks are not the expected ones
-raises and names itself.
+Each reader names the library it reads, so `LentiMPRAAgarwal2025Dataset` takes that
+library's cloning adapters off the published `seq` column and yields the element its
+construct expects. A row whose flanks are not the expected ones raises and names itself.
 
 The individual pieces live in `alphagenome_encoder_ft.constructs` rather than the top-level API, for composing a layout of your own, such as an ablation that drops the barcode:
 
 ```python
 from alphagenome_encoder_ft import Construct
-from alphagenome_encoder_ft.constructs import LENTIMPRA_PROMOTER
+from alphagenome_encoder_ft import Construct, LentiMPRAAgarwal2025Library as Agarwal2025
 
-promoter_only = Construct(suffix=LENTIMPRA_PROMOTER, length=281)
+promoter_only = Construct(suffix=Agarwal2025.PROMOTER, length=Agarwal2025.INPUT_BP)
 ```
-
-Available: `LENTIMPRA_PROMOTER`, `LENTIMPRA_BARCODE`, `LENTIMPRA_LEFT_ADAPTER`, `LENTIMPRA_RIGHT_ADAPTER`, `DEEPSTARR_ADAPTER_UP`, `DEEPSTARR_ADAPTER_DOWN`.
 
 ## Scoring inserts
 
@@ -138,15 +139,19 @@ saliency = x.grad                                      # (1, L, 4), aligned to t
 `MPRADataset` takes inserts and targets in memory and owns the construct and the augmentation. It is not tied to a file format, so a variant table assembled in Python works directly:
 
 ```python
-from alphagenome_encoder_ft import MPRADataset, lentimpra_construct
+from alphagenome_encoder_ft import MPRADataset, LentiMPRAAgarwal2025Library
 
-ds = MPRADataset(elements, targets, construct=lentimpra_construct(), reverse_complement=True)
+construct = LentiMPRAAgarwal2025Library.construct()
+ds = MPRADataset(elements, targets, construct=construct, reverse_complement=True)
 ```
 
 Readers subclass it and parse one assay's layout:
 
-- `LentiMPRADataset(input_tsv, split=...)` — `seq` / `mean_value` / `fold` / `rev`; keeps `rev == 0`, selects folds per split, and yields the 200 bp element as the insert.
-- `DeepSTARRDataset(input_tsv, split=...)` — a split column plus two log2 targets.
+- `LentiMPRAAgarwal2025Dataset(input_tsv, split=...)` — `seq` / `mean_value` / `fold` / `rev`; keeps `rev == 0`, selects folds per split, and yields the 200 bp element as the insert.
+- `DeepSTARRDeAlmeida2022Dataset(input_tsv, split=...)` — a split column plus two log2 targets.
+
+A reader is named for the table it reads, since the column names, split convention and
+adapter sequences are specific to one publication.
 
 Reverse complement applies to the whole assembled sequence, matching a double-stranded plasmid.
 

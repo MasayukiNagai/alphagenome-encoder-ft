@@ -8,13 +8,12 @@ import torch
 from alphagenome_pytorch.utils.sequence import sequence_to_onehot
 
 from alphagenome_encoder_ft.constructs import (
-    LENTIMPRA_BARCODE,
-    LENTIMPRA_LEFT_ADAPTER,
-    LENTIMPRA_RIGHT_ADAPTER,
     Construct,
-    deepstarr_construct,
-    lentimpra_construct,
+    DeepSTARRDeAlmeida2022Library,
+    LentiMPRAAgarwal2025Library,
 )
+
+AGARWAL = LentiMPRAAgarwal2025Library
 
 
 def _onehot(sequence: str) -> torch.Tensor:
@@ -128,28 +127,28 @@ def test_to_dict_from_dict_roundtrip():
     assert Construct.from_dict({}) == Construct()
 
 
-def test_lentimpra_construct_wraps_a_bare_element_in_the_whole_reporter():
-    construct = lentimpra_construct()
-    assembled = construct.assemble_sequence("A" * 200)
+def test_lentimpra_construct_wraps_the_element_in_the_whole_reporter():
+    construct = AGARWAL.construct()
+    assembled = construct.assemble_sequence("A" * AGARWAL.ELEMENT_BP)
 
-    assert construct.length == 281
+    assert construct.length == AGARWAL.INPUT_BP == 281
     # 15 + 200 + 15 + 36 + 15 = 281, so nothing is trimmed or padded.
     assert len(assembled) == 281
     assert "N" not in assembled
-    assert assembled.startswith(LENTIMPRA_LEFT_ADAPTER)
-    assert assembled.endswith(LENTIMPRA_BARCODE)
+    assert assembled.startswith(AGARWAL.LEFT_ADAPTER)
+    assert assembled.endswith(AGARWAL.BARCODE)
 
 
 def test_lentimpra_construct_places_the_element_where_the_published_seq_has_it():
     """seq is adapter + element + adapter, so the first 230 bp of the reporter is that seq."""
 
     element = "ACGT" * 50
-    assembled = lentimpra_construct().assemble_sequence(element)
+    assembled = AGARWAL.construct().assemble_sequence(element)
 
-    assert assembled[:230] == LENTIMPRA_LEFT_ADAPTER + element + LENTIMPRA_RIGHT_ADAPTER
+    assert assembled[:230] == AGARWAL.LEFT_ADAPTER + element + AGARWAL.RIGHT_ADAPTER
 
 
 def test_deepstarr_construct_layout():
-    construct = deepstarr_construct()
+    construct = DeepSTARRDeAlmeida2022Library.construct()
     assert construct.length == 256
     assert len(construct.assemble_sequence("A" * 249)) == 256
