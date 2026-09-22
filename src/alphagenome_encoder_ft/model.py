@@ -13,7 +13,7 @@ from alphagenome_pytorch import AlphaGenome
 from alphagenome_pytorch.extensions.finetuning.transfer import load_trunk, remove_all_heads
 from alphagenome_pytorch.utils.sequence import sequence_to_onehot_tensor
 
-from .config import HeadConfig, build_head
+from .config import HeadConfig, TrainConfig, build_head
 from .constructs import Construct
 
 
@@ -194,3 +194,24 @@ class AlphaGenomeEncoderModel(nn.Module):
         model.to(device)
         model.eval()
         return model
+
+    # -------------------------
+    # Checkpointing
+    # -------------------------
+
+    def save_checkpoint(
+        self,
+        path: str | Path,
+        *,
+        save_mode: str = "minimal",
+        config: TrainConfig | None = None,
+    ) -> Path:
+        """Write a checkpoint ``from_checkpoint`` can restore, with no ``TrainConfig`` needed.
+
+        ``config`` is recorded as provenance when given; :mod:`cli` passes the one it trained
+        with. The import is local because :mod:`train` imports this module.
+        """
+
+        from .train import save_checkpoint
+
+        return save_checkpoint(path, self, save_mode=save_mode, config=config)

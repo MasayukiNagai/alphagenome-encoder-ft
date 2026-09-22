@@ -563,7 +563,10 @@ def evaluate_checkpoint(
 
     checkpoint_path = Path(checkpoint_path).resolve()
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    config = TrainConfig.from_dict(checkpoint["config"])
+    # The config is provenance a checkpoint need not carry; without it the loader and runtime
+    # settings fall back to TrainConfig defaults, which the arguments below override anyway.
+    saved_config = checkpoint.get("config")
+    config = TrainConfig.from_dict(saved_config) if saved_config else TrainConfig()
 
     batch_size = batch_size if batch_size is not None else config.data.batch_size
     num_workers = num_workers if num_workers is not None else config.data.num_workers
@@ -591,8 +594,6 @@ def evaluate_checkpoint(
             "construct": model.construct.to_dict() if model.construct is not None else None,
             "input_length": model.input_length,
             "save_mode": checkpoint.get("save_mode"),
-            "checkpoint_stage": checkpoint.get("stage"),
-            "checkpoint_epoch": checkpoint.get("epoch"),
         }
     )
 
