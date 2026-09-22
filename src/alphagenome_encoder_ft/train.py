@@ -1,4 +1,10 @@
-"""Reusable encoder-only training primitives."""
+"""Training primitives: the epoch loop, evaluation, checkpointing and the two-stage schedule.
+
+Library level. Everything here takes a model, data loaders and a :class:`TrainConfig` that
+the caller already built, so it can be driven from a notebook or an analysis script as
+easily as from a command line. Turning command-line arguments and config files into those
+objects, and laying out a run directory around them, is :mod:`alphagenome_encoder_ft.cli`.
+"""
 
 from __future__ import annotations
 
@@ -16,10 +22,31 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 
 try:
     from tqdm.auto import tqdm
-except ImportError:
+except ImportError:  # optional: only needed when show_progress is set
     tqdm = None
 
+_warned_about_tqdm = False
+
+
+def _progress_iterator(iterable, *, total: int | None, show_progress: bool) -> tuple[Any, bool]:
+    """Wrap ``iterable`` in a progress bar when asked for and available.
+
+    Returns the iterator and whether it is a bar, so callers know if they can post to it.
+    """
+
+    global _warned_about_tqdm
+
+    if not show_progress:
+        return iterable, False
+    if tqdm is None:
+        if not _warned_about_tqdm:
+            print("tqdm is not installed; continuing without a progress bar")
+            _warned_about_tqdm = True
+        return iterable, False
+    return tqdm(iterable, total=total, desc="train", leave=False), True
+
 from .config import OptimConfig, TrainConfig
+from .metrics import per_track, pearsonr
 from .model import AlphaGenomeEncoderModel
 
 
@@ -33,36 +60,12 @@ def _default_loss_fn(preds: Tensor, targets: Tensor) -> Tensor:
     return F.mse_loss(preds.float(), targets.float())
 
 
-def _pearson_r(preds: Tensor, targets: Tensor, eps: float = 1e-8) -> Tensor:
-    preds = preds.float()
-    targets = targets.float()
-    if preds.numel() < 2:
-        return torch.tensor(float("nan"), device=preds.device)
-    preds_centered = preds - preds.mean()
-    targets_centered = targets - targets.mean()
-    denom = preds_centered.pow(2).sum().sqrt() * targets_centered.pow(2).sum().sqrt()
-    return (preds_centered * targets_centered).sum() / (denom + eps)
-
-
-# per-track pearson when preds/targets are (N, K); returns one scalar per track.
-def _pearson_r_per_track(preds: Tensor, targets: Tensor, eps: float = 1e-8) -> list[float]:
-    if preds.ndim != 2 or targets.ndim != 2 or preds.shape[1] < 2:
-        return []
-    preds = preds.float()
-    targets = targets.float()
-    scores: list[float] = []
-    for track in range(preds.shape[1]):
-        r = _pearson_r(preds[:, track], targets[:, track], eps=eps)
-        scores.append(float(r.detach().cpu().item()))
-    return scores
-
-
 def _compute_metrics(
     preds: Tensor,
     targets: Tensor,
     metric_fns: dict[str, Callable[[Tensor, Tensor], Tensor | float]] | None,
 ) -> dict[str, float]:
-    functions = metric_fns or {"pearson": _pearson_r}
+    functions = metric_fns or {"pearson": pearsonr}
     metrics: dict[str, float] = {}
     for name, fn in functions.items():
         value = fn(preds, targets)
@@ -71,8 +74,7 @@ def _compute_metrics(
         metrics[name] = float(value)
 
     # multi-output heads (e.g. DeepSTARR dev+hk): also report per-track pearson.
-    per_track = _pearson_r_per_track(preds, targets)
-    for idx, score in enumerate(per_track):
+    for idx, score in enumerate(per_track(pearsonr, preds, targets)):
         metrics[f"pearson_track{idx}"] = score
     return metrics
 
@@ -168,15 +170,9 @@ def train_epoch(
 
     optimizer.zero_grad(set_to_none=True)
 
-    num_batches = _num_batches(train_loader)
-    batch_iterator = train_loader
-    if tqdm is not None and show_progress:
-        batch_iterator = tqdm(
-            train_loader,
-            total=num_batches,
-            desc="train",
-            leave=False,
-        )
+    batch_iterator, showing_progress = _progress_iterator(
+        train_loader, total=_num_batches(train_loader), show_progress=show_progress
+    )
 
     for batch_idx, (sequences, targets) in enumerate(batch_iterator, start=1):
         sequences = sequences.to(device)
@@ -212,7 +208,7 @@ def train_epoch(
         all_preds.append(preds.detach().float().cpu())
         all_targets.append(targets.detach().float().cpu())
 
-        if tqdm is not None and show_progress:
+        if showing_progress:
             batch_iterator.set_postfix(loss=total_loss / max(1, total_samples))
 
         if batch_end_callback is not None and not batch_end_callback(batch_idx, len(train_loader)):
@@ -275,7 +271,14 @@ def save_checkpoint(
     epoch: int,
     metrics: dict[str, Any] | None = None,
 ) -> Path:
-    """Save a checkpoint following the repo checkpoint contract."""
+    """Save a checkpoint following the repo checkpoint contract.
+
+    The payload carries the model's ``construct`` (or ``None``) and ``input_length`` so
+    ``AlphaGenomeEncoderModel.from_checkpoint`` can rebuild the head and score raw inserts.
+    """
+
+    if model.input_length is None:
+        raise ValueError("model.input_length is unset; call model.initialize_head(...) before saving")
 
     checkpoint_path = Path(path)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
@@ -288,7 +291,8 @@ def save_checkpoint(
         "head_type": config.head.head_type,
         "head_state_dict": model.head.state_dict(),
         "head_config": config.head_kwargs(),
-        "construct_config": config.construct_config(),
+        "construct": model.construct.to_dict() if model.construct is not None else None,
+        "input_length": int(model.input_length),
         "metrics": metrics or {},
     }
 

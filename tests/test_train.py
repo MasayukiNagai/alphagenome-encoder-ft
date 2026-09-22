@@ -8,28 +8,12 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, TensorDataset
 
 from alphagenome_encoder_ft.config import OptimConfig, TrainConfig
+from alphagenome_encoder_ft.constructs import Construct
 from alphagenome_encoder_ft.heads import DeepSTARRHead, MPRAHead
-from alphagenome_encoder_ft.model import EncoderMPRAModel
+from alphagenome_encoder_ft.model import AlphaGenomeEncoderModel
 import alphagenome_encoder_ft.train as train_module
 from alphagenome_encoder_ft.train import create_scheduler, evaluate, load_checkpoint, run_training_stage, run_two_stage_training, save_checkpoint
-
-
-class DummyAlphaGenome(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.encoder = torch.nn.Sequential(
-            torch.nn.Linear(4, 32),
-            torch.nn.ReLU(),
-            torch.nn.Linear(32, 1536),
-        )
-
-    def forward(self, sequences, organism_idx, encoder_only=False):
-        del organism_idx
-        if not encoder_only:
-            raise ValueError("Dummy model only supports encoder_only=True")
-        batch, length, channels = sequences.shape
-        encoded = self.encoder(sequences.reshape(batch * length, channels)).reshape(batch, length, 1536)
-        return {"encoder_output": encoded}
+from conftest import DummyAlphaGenome
 
 
 def _make_loader():
@@ -42,11 +26,7 @@ def _make_loader():
 def _make_config(tmp_path: Path) -> TrainConfig:
     return TrainConfig.from_dict(
         {
-            "data": {
-                "input_tsv": "/tmp/mock.tsv",
-                "sequence_length": 256,
-                "batch_size": 4,
-            },
+            "data": {"batch_size": 4},
             "head": {
                 "pooling_type": "flatten",
                 "hidden_sizes": [8],
@@ -85,8 +65,12 @@ def _make_config(tmp_path: Path) -> TrainConfig:
     )
 
 
-def _make_model() -> EncoderMPRAModel:
-    model = EncoderMPRAModel(DummyAlphaGenome(), MPRAHead(pooling_type="flatten", hidden_sizes=8))
+def _make_model(construct: Construct | None = None) -> AlphaGenomeEncoderModel:
+    model = AlphaGenomeEncoderModel(
+        DummyAlphaGenome(),
+        MPRAHead(pooling_type="flatten", hidden_sizes=8),
+        construct=construct,
+    )
     model.initialize_head(sequence_length=2, device="cpu")
     return model
 
@@ -217,7 +201,6 @@ def test_stage_config_rejects_invalid_second_stage_dropout():
     try:
         TrainConfig.from_dict(
             {
-                "data": {"input_tsv": "/tmp/mock.tsv"},
                 "checkpoint": {"pretrained_weights": "/tmp/weights.pt"},
                 "stage": {"second_stage_dropout": 1.0},
             }
@@ -232,7 +215,6 @@ def test_stage_config_rejects_unknown_second_stage_lr_scheduler():
     try:
         TrainConfig.from_dict(
             {
-                "data": {"input_tsv": "/tmp/mock.tsv"},
                 "checkpoint": {"pretrained_weights": "/tmp/weights.pt"},
                 "stage": {"second_stage_lr_scheduler": "linear"},
             }
@@ -412,7 +394,6 @@ def test_train_config_rejects_invalid_plateau_settings():
     try:
         TrainConfig.from_dict(
             {
-                "data": {"input_tsv": "/tmp/mock.tsv"},
                 "checkpoint": {"pretrained_weights": "/tmp/weights.pt"},
                 "optim": {"plateau_factor": 1.0},
             }
@@ -440,32 +421,43 @@ def test_save_checkpoint_persists_head_type_mpra_default(tmp_path: Path):
     assert payload["head_config"]["num_outputs"] == 1
 
 
-def test_from_checkpoint_without_head_type_defaults_to_mpra(tmp_path: Path):
-    # mimic a pre-PR checkpoint: no head_type field on the payload at all.
-    model = _make_model()
-    config = _make_config(tmp_path)
+def test_save_checkpoint_persists_the_construct_and_input_length(tmp_path: Path):
+    construct = Construct(prefix="AC", suffix="GT", length=281)
     path = save_checkpoint(
-        tmp_path / "legacy.pt",
-        model,
-        config=config,
+        tmp_path / "with_construct.pt",
+        _make_model(construct),
+        config=_make_config(tmp_path),
         save_mode="minimal",
         stage="stage1",
         epoch=1,
     )
     payload = torch.load(path, map_location="cpu", weights_only=False)
-    payload.pop("head_type", None)
-    payload["head_config"].pop("head_type", None)
-    torch.save(payload, path)
 
-    restored = torch.load(path, map_location="cpu", weights_only=False)
-    assert "head_type" not in restored
-    # dispatch logic inside EncoderMPRAModel.from_checkpoint reads
-    # checkpoint.get("head_type", ..., "mpra"); re-exercise that path directly here.
-    from alphagenome_encoder_ft.config import build_head
-    head = build_head(
-        restored.get("head_type", restored.get("head_config", {}).get("head_type", "mpra")),
-        restored.get("head_config", {}),
+    assert payload["construct"] == {"prefix": "AC", "suffix": "GT", "length": 281}
+    # input_length is what the head was actually built for, set by initialize_head.
+    assert payload["input_length"] == 2
+    assert "construct_config" not in payload
+
+
+def test_save_checkpoint_records_a_null_construct(tmp_path: Path):
+    path = save_checkpoint(
+        tmp_path / "no_construct.pt",
+        _make_model(),
+        config=_make_config(tmp_path),
+        save_mode="minimal",
+        stage="stage1",
+        epoch=1,
     )
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+
+    assert payload["construct"] is None
+    assert payload["input_length"] == 2
+
+
+def test_head_type_dispatch_defaults_to_mpra_when_absent():
+    from alphagenome_encoder_ft.config import build_head
+
+    head = build_head("mpra", {"pooling_type": "flatten", "hidden_sizes": [8]})
     assert isinstance(head, MPRAHead)
     assert not isinstance(head, DeepSTARRHead)
 
@@ -475,7 +467,6 @@ def test_save_checkpoint_persists_head_type_deepstarr(tmp_path: Path):
     # carries the dispatch field.
     config = TrainConfig.from_dict(
         {
-            "data": {"input_tsv": "/tmp/mock.tsv", "sequence_length": 256},
             "head": {
                 "head_type": "deepstarr",
                 "pooling_type": "flatten",
@@ -493,7 +484,7 @@ def test_save_checkpoint_persists_head_type_deepstarr(tmp_path: Path):
             "stage": {"second_stage_lr": 1e-3},
         }
     )
-    model = EncoderMPRAModel(DummyAlphaGenome(), DeepSTARRHead(pooling_type="flatten", hidden_sizes=8))
+    model = AlphaGenomeEncoderModel(DummyAlphaGenome(), DeepSTARRHead(pooling_type="flatten", hidden_sizes=8))
     model.initialize_head(sequence_length=2, device="cpu")
     path = save_checkpoint(
         tmp_path / "deepstarr.pt",
@@ -506,3 +497,59 @@ def test_save_checkpoint_persists_head_type_deepstarr(tmp_path: Path):
     payload = torch.load(path, map_location="cpu", weights_only=False)
     assert payload["head_type"] == "deepstarr"
     assert payload["head_config"]["num_outputs"] == 2
+
+
+# -------------------------
+# Progress bar (tqdm is optional)
+# -------------------------
+
+
+def test_progress_iterator_passes_through_when_not_asked_for():
+    rows = [1, 2, 3]
+    iterator, showing = train_module._progress_iterator(rows, total=3, show_progress=False)
+    assert iterator is rows
+    assert showing is False
+
+
+def test_progress_iterator_returns_a_bar_when_tqdm_is_available():
+    if train_module.tqdm is None:
+        pytest.skip("tqdm is not installed")
+    iterator, showing = train_module._progress_iterator([1, 2, 3], total=3, show_progress=True)
+    assert showing is True
+    assert hasattr(iterator, "set_postfix")
+
+
+def test_progress_iterator_warns_once_and_falls_back_without_tqdm(monkeypatch, capsys):
+    # tqdm lives in the optional train group, so --show_progress must say something
+    # rather than silently doing nothing.
+    monkeypatch.setattr(train_module, "tqdm", None)
+    monkeypatch.setattr(train_module, "_warned_about_tqdm", False)
+    rows = [1, 2, 3]
+
+    iterator, showing = train_module._progress_iterator(rows, total=3, show_progress=True)
+    train_module._progress_iterator(rows, total=3, show_progress=True)
+
+    assert iterator is rows
+    assert showing is False
+    assert capsys.readouterr().out.count("tqdm is not installed") == 1
+
+
+def test_training_runs_with_show_progress_and_no_tqdm(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(train_module, "tqdm", None)
+    model = _make_model()
+    config = _make_config(tmp_path)
+
+    result = run_training_stage(
+        model,
+        _make_loader(),
+        optimizer=torch.optim.Adam(model.head.parameters(), lr=1e-2),
+        config=config,
+        device="cpu",
+        num_epochs=1,
+        stage="stage1",
+        train_encoder=False,
+        checkpoint_dir=tmp_path / "stage1",
+        show_progress=True,
+    )
+
+    assert result["best_checkpoint_path"] is not None

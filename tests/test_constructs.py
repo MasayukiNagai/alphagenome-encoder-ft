@@ -1,324 +1,154 @@
-from __future__ import annotations
+"""Construct assembly: window rule, jitter offset, one-hot equivalence, serialization."""
 
-from pathlib import Path
+from __future__ import annotations
 
 import numpy as np
 import pytest
 import torch
 from alphagenome_pytorch.utils.sequence import sequence_to_onehot
 
-from alphagenome_encoder_ft.config import TrainConfig
-from alphagenome_encoder_ft.constructs import ConstructSpec
-from alphagenome_encoder_ft.heads import MPRAHead
-from alphagenome_encoder_ft.model import EncoderMPRAModel
-from alphagenome_encoder_ft.train import save_checkpoint
+from alphagenome_encoder_ft.constructs import (
+    Construct,
+    DeepSTARRDeAlmeida2022Library,
+    LentiMPRAAgarwal2025Library,
+)
+
+AGARWAL = LentiMPRAAgarwal2025Library
 
 
-class DummyAlphaGenome(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.encoder = torch.nn.Sequential(
-            torch.nn.Linear(4, 16),
-            torch.nn.ReLU(),
-            torch.nn.Linear(16, 1536),
-        )
-
-    def forward(self, sequences, organism_idx, encoder_only=False):
-        del organism_idx
-        if not encoder_only:
-            raise ValueError("Dummy model only supports encoder_only=True")
-        batch, length, channels = sequences.shape
-        encoded = self.encoder(sequences.reshape(batch * length, channels)).reshape(batch, length, 1536)
-        return {"encoder_output": encoded}
+def _onehot(sequence: str) -> torch.Tensor:
+    return torch.from_numpy(sequence_to_onehot(sequence).astype(np.float32))
 
 
-def _make_config(tmp_path: Path, *, save_mode: str = "minimal") -> TrainConfig:
-    return TrainConfig.from_dict(
-        {
-            "data": {
-                "input_tsv": "/tmp/mock.tsv",
-                "sequence_length": 2,
-                "left_adapter_seq": "A",
-                "right_adapter_seq": "C",
-                "promoter_seq": "G",
-                "barcode_seq": "T",
-            },
-            "head": {
-                "pooling_type": "flatten",
-                "hidden_sizes": [8],
-                "center_bp": 256,
-                "dropout": 0.1,
-                "activation": "relu",
-            },
-            "checkpoint": {
-                "pretrained_weights": "/tmp/weights.pt",
-                "checkpoint_dir": str(tmp_path),
-                "save_mode": save_mode,
-            },
-        }
-    )
+def test_no_length_concatenates_flanks():
+    construct = Construct(prefix="AA", suffix="TTT")
+    assert construct.assemble_sequence("cg") == "AACGTTT"
+    assert construct.assemble_sequences(["cg", "gc"]) == ["AACGTTT", "AAGCTTT"]
+    # __call__ is the same method.
+    assert construct("cg") == construct.assemble_sequence("cg")
 
 
-def test_construct_spec_assembles_sequences_for_all_modes():
-    spec = ConstructSpec(left_adapter="A", right_adapter="C", promoter_seq="G", barcode_seq="T")
-
-    assert spec.assemble_sequence("ac", mode="all") == "AACCGT"
-    assert spec.assemble_sequence("ac", mode="adapters") == "AACC"
-    assert spec.assemble_sequence("ac", mode="promoter") == "ACG"
-    assert spec.assemble_sequence("ac", mode="promoter_barcode") == "ACGT"
-    assert spec.assemble_sequence("ac", mode="none") == "AC"
+def test_no_length_rejects_offset():
+    with pytest.raises(ValueError, match="offset requires"):
+        Construct(prefix="A").assemble_sequence("CG", offset=1)
 
 
-def test_construct_spec_rejects_missing_required_parts():
-    spec = ConstructSpec(left_adapter=None, right_adapter=None, promoter_seq=None, barcode_seq=None)
+def test_trim_puts_the_odd_base_on_the_suffix_side():
+    # assembled = A + CCCCCCCCCCC + G = 13 bases, windowed to 10: 1 off the left, 2 off the right.
+    construct = Construct(prefix="A", suffix="G", length=10)
+    assert construct.assemble_sequence("C" * 11) == "CCCCCCCCCC"
 
-    with pytest.raises(ValueError, match="requires construct components"):
-        spec.assemble_sequence("ac", mode="all")
-    with pytest.raises(ValueError, match="requires construct components"):
-        spec.assemble_sequence("ac", mode="adapters")
-    with pytest.raises(ValueError, match="requires construct components"):
-        spec.assemble_sequence("ac", mode="promoter")
-    with pytest.raises(ValueError, match="requires construct components"):
-        spec.assemble_sequence("ac", mode="promoter_barcode")
-    assert spec.assemble_sequence("ac", mode="none") == "AC"
+    # even trim: 12 -> 10 removes 1 from each end.
+    construct = Construct(prefix="AA", suffix="GG", length=10)
+    assert construct.assemble_sequence("C" * 8) == "ACCCCCCCCG"
 
 
-def test_construct_spec_assembles_onehot_for_rank_2_and_rank_3():
-    spec = ConstructSpec(left_adapter="A", right_adapter="C", promoter_seq="G", barcode_seq="T")
-    single = torch.tensor([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]])
-    batch = torch.stack([single, single], dim=0)
+def test_pad_puts_the_odd_base_on_the_suffix_side():
+    # assembled = A + CC + G = 4 bases, windowed to 7: 1 N on the left, 2 on the right.
+    construct = Construct(prefix="A", suffix="G", length=7)
+    assert construct.assemble_sequence("cc") == "NACCGNN"
 
-    assembled_single = spec.assemble_onehot(single, mode="all")
-    assembled_batch = spec.assemble_onehot(batch, mode="adapters")
-
-    assert assembled_single.shape == (6, 4)
-    assert assembled_batch.shape == (2, 4, 4)
-    assert assembled_single.dtype == single.dtype
-    assert assembled_batch.dtype == batch.dtype
+    # even pad: 4 -> 6 adds 1 N on each side.
+    assert Construct(prefix="A", suffix="G", length=6).assemble_sequence("cc") == "NACCGN"
 
 
-def test_construct_spec_rejects_invalid_shapes_and_modes():
-    spec = ConstructSpec()
+def test_offset_slides_the_window():
+    construct = Construct(prefix="AAA", suffix="GGG", length=6)
+    # assembled = AAACCCCGGG (10), centered window starts at 2.
+    assert construct.assemble_sequence("CCCC") == "ACCCCG"
+    assert construct.assemble_sequence("CCCC", offset=2) == "CCCGGG"
+    assert construct.assemble_sequence("CCCC", offset=-2) == "AAACCC"
 
-    with pytest.raises(ValueError, match="Invalid mode"):
-        spec.assemble_sequence("AC", mode="bad")
+
+def test_offset_at_exact_fit_drops_one_side_and_pads_the_other():
+    construct = Construct(prefix="A", suffix="G", length=4)
+    assert construct.assemble_sequence("CC") == "ACCG"
+    assert construct.assemble_sequence("CC", offset=1) == "CCGN"
+    assert construct.assemble_sequence("CC", offset=-1) == "NACC"
+
+
+@pytest.mark.parametrize("offset", [-2, 0, 1])
+@pytest.mark.parametrize(
+    "construct",
+    [
+        Construct(prefix="AG", suffix="TC", length=8),
+        Construct(prefix="AG", suffix="TC", length=4),
+        Construct(suffix="TCTC", length=6),
+        Construct(prefix="AG"),
+    ],
+    ids=["pad", "trim", "suffix_only", "no_length"],
+)
+def test_assemble_onehot_matches_assemble_sequence(construct: Construct, offset: int):
+    if construct.length is None and offset != 0:
+        pytest.skip("offset needs a length")
+    insert = "ACGT"
+    expected = _onehot(construct.assemble_sequence(insert, offset=offset))
+    got = construct.assemble_onehot(_onehot(insert), offset=offset)
+    torch.testing.assert_close(got, expected)
+
+
+def test_assemble_onehot_handles_batches():
+    construct = Construct(prefix="A", suffix="G", length=6)
+    batch = torch.stack([_onehot("ACGT"), _onehot("TTTT")], dim=0)
+    got = construct.assemble_onehot(batch)
+    assert got.shape == (2, 6, 4)
+    torch.testing.assert_close(got[0], construct.assemble_onehot(_onehot("ACGT")))
+    torch.testing.assert_close(got[1], construct.assemble_onehot(_onehot("TTTT")))
+
+
+def test_assemble_onehot_is_differentiable_through_the_insert():
+    construct = Construct(prefix="AAA", suffix="GGG", length=8)
+    insert = _onehot("ACGT").unsqueeze(0).requires_grad_(True)
+    construct.assemble_onehot(insert).sum().backward()
+    assert insert.grad is not None
+    assert insert.grad.shape == insert.shape
+    assert torch.count_nonzero(insert.grad) > 0
+
+
+def test_assemble_onehot_rejects_bad_shapes():
+    construct = Construct(length=4)
     with pytest.raises(ValueError, match="rank 2 or 3"):
-        spec.assemble_onehot(torch.zeros(4))
-    with pytest.raises(ValueError, match="Expected shape"):
-        spec.assemble_onehot(torch.zeros(2, 5))
+        construct.assemble_onehot(torch.zeros(4))
+    with pytest.raises(ValueError, match="last dimension 4"):
+        construct.assemble_onehot(torch.zeros(4, 5))
 
 
-def test_construct_spec_rejects_missing_required_parts_for_onehot():
-    spec = ConstructSpec(left_adapter=None, right_adapter="C", promoter_seq=None, barcode_seq="T")
-    onehot = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
-
-    with pytest.raises(ValueError, match="left_adapter"):
-        spec.assemble_onehot(onehot, mode="adapters")
-    with pytest.raises(ValueError, match="promoter_seq"):
-        spec.assemble_onehot(onehot, mode="all")
-    with pytest.raises(ValueError, match="promoter_seq"):
-        spec.assemble_onehot(onehot, mode="promoter")
-    with pytest.raises(ValueError, match="promoter_seq"):
-        spec.assemble_onehot(onehot, mode="promoter_barcode")
+def test_flanks_are_normalized_and_length_validated():
+    construct = Construct(prefix=" ac ", suffix="gt")
+    assert (construct.prefix, construct.suffix) == ("AC", "GT")
+    with pytest.raises(ValueError, match="length must be > 0"):
+        Construct(length=0)
 
 
-def test_from_checkpoint_roundtrip_minimal_without_pretrained_weights(tmp_path: Path):
-    torch.manual_seed(0)
-    construct_spec = ConstructSpec(left_adapter="A", right_adapter="C", promoter_seq="G", barcode_seq="T")
-    model = EncoderMPRAModel(
-        DummyAlphaGenome(),
-        MPRAHead(pooling_type="flatten", hidden_sizes=8),
-        construct_spec=construct_spec,
-    )
-    model.initialize_head(sequence_length=2, device="cpu")
-    model.eval()
-
-    insert = torch.tensor([[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]], dtype=torch.float32)
-    construct = construct_spec.assemble_onehot(insert, mode="none")
-    direct_preds = model(construct, torch.zeros(1, dtype=torch.long))
-
-    checkpoint_path = save_checkpoint(
-        tmp_path / "best.pt",
-        model,
-        config=_make_config(tmp_path, save_mode="minimal"),
-        save_mode="minimal",
-        stage="stage1",
-        epoch=1,
-    )
-
-    restored = EncoderMPRAModel.from_checkpoint(
-        checkpoint_path,
-        device="cpu",
-        backbone_factory=DummyAlphaGenome,
-    )
-    restored_preds = restored(construct, torch.zeros(1, dtype=torch.long))
-
-    np.testing.assert_allclose(restored_preds.detach().numpy(), direct_preds.detach().numpy(), rtol=1e-5, atol=1e-5)
-    assert restored.construct_spec == construct_spec
+def test_to_dict_from_dict_roundtrip():
+    construct = Construct(prefix="AC", suffix="GT", length=12)
+    assert Construct.from_dict(construct.to_dict()) == construct
+    assert Construct.from_dict(None) is None
+    assert Construct.from_dict({}) == Construct()
 
 
-def test_from_checkpoint_roundtrip_full(tmp_path: Path):
-    torch.manual_seed(0)
-    construct_spec = ConstructSpec(left_adapter="A", right_adapter="C", promoter_seq="G", barcode_seq="T")
-    model = EncoderMPRAModel(
-        DummyAlphaGenome(),
-        MPRAHead(pooling_type="flatten", hidden_sizes=8),
-        construct_spec=construct_spec,
-    )
-    model.initialize_head(sequence_length=2, device="cpu")
-    model.eval()
+def test_lentimpra_construct_wraps_the_element_in_the_whole_reporter():
+    construct = AGARWAL.construct()
+    assembled = construct.assemble_sequence("A" * AGARWAL.INSERT_LENGTH)
 
-    checkpoint_path = save_checkpoint(
-        tmp_path / "best_full.pt",
-        model,
-        config=_make_config(tmp_path, save_mode="full"),
-        save_mode="full",
-        stage="stage1",
-        epoch=1,
-    )
-
-    restored = EncoderMPRAModel.from_checkpoint(
-        checkpoint_path,
-        device="cpu",
-        backbone_factory=DummyAlphaGenome,
-    )
-    assert restored.construct_spec == construct_spec
+    assert construct.length == AGARWAL.INPUT_LENGTH == 281
+    # 15 + 200 + 15 + 36 + 15 = 281, so nothing is trimmed or padded.
+    assert len(assembled) == 281
+    assert "N" not in assembled
+    assert assembled.startswith(AGARWAL.LEFT_ADAPTER)
+    assert assembled.endswith(AGARWAL.BARCODE)
 
 
-def test_from_checkpoint_defaults_to_inferred_device(tmp_path: Path):
-    torch.manual_seed(0)
-    construct_spec = ConstructSpec(left_adapter="A", right_adapter="C", promoter_seq="G", barcode_seq="T")
-    model = EncoderMPRAModel(
-        DummyAlphaGenome(),
-        MPRAHead(pooling_type="flatten", hidden_sizes=8),
-        construct_spec=construct_spec,
-    )
-    model.initialize_head(sequence_length=2, device="cpu")
-    model.eval()
+def test_lentimpra_construct_places_the_element_where_the_published_seq_has_it():
+    """seq is adapter + element + adapter, so the first 230 bp of the reporter is that seq."""
 
-    checkpoint_path = save_checkpoint(
-        tmp_path / "best_default_device.pt",
-        model,
-        config=_make_config(tmp_path, save_mode="minimal"),
-        save_mode="minimal",
-        stage="stage1",
-        epoch=1,
-    )
+    element = "ACGT" * 50
+    assembled = AGARWAL.construct().assemble_sequence(element)
 
-    restored = EncoderMPRAModel.from_checkpoint(
-        checkpoint_path,
-        backbone_factory=DummyAlphaGenome,
-    )
-    expected_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    restored_device = next(restored.parameters()).device
-    if expected_device.type == "cuda":
-        assert restored_device.type == expected_device.type
-    else:
-        assert restored_device == expected_device
-    assert restored.construct_spec == construct_spec
+    assert assembled[:230] == AGARWAL.LEFT_ADAPTER + element + AGARWAL.RIGHT_ADAPTER
 
 
-def test_from_checkpoint_rejects_head_only_checkpoint(tmp_path: Path):
-    model = EncoderMPRAModel(DummyAlphaGenome(), MPRAHead(pooling_type="flatten", hidden_sizes=8))
-    model.initialize_head(sequence_length=2, device="cpu")
-
-    checkpoint_path = save_checkpoint(
-        tmp_path / "head_only.pt",
-        model,
-        config=_make_config(tmp_path, save_mode="head"),
-        save_mode="head",
-        stage="stage1",
-        epoch=1,
-    )
-
-    with pytest.raises(ValueError, match="Head-only checkpoints"):
-        EncoderMPRAModel.from_checkpoint(
-            checkpoint_path,
-            device="cpu",
-            backbone_factory=DummyAlphaGenome,
-        )
-
-
-def test_predict_sequences_matches_direct_forward():
-    torch.manual_seed(0)
-    construct_spec = ConstructSpec(left_adapter="A", right_adapter="C", promoter_seq="G", barcode_seq="T")
-    model = EncoderMPRAModel(
-        DummyAlphaGenome(),
-        MPRAHead(pooling_type="flatten", hidden_sizes=8),
-        construct_spec=construct_spec,
-    )
-    model.initialize_head(sequence_length=4, device="cpu")
-    model.eval()
-
-    construct = construct_spec.assemble_sequence("ac", mode="promoter_barcode")
-    onehot = torch.from_numpy(sequence_to_onehot(construct).astype(np.float32)).unsqueeze(0)
-
-    direct = model(onehot, torch.zeros(1, dtype=torch.long))
-    predicted = model.predict_sequences(["ac"], construct_mode="promoter_barcode")
-
-    np.testing.assert_allclose(predicted.detach().numpy(), direct.detach().numpy(), rtol=1e-5, atol=1e-5)
-
-
-def test_predict_sequences_batches_inputs_and_organism_idx():
-    torch.manual_seed(0)
-    model = EncoderMPRAModel(
-        DummyAlphaGenome(),
-        MPRAHead(pooling_type="flatten", hidden_sizes=8),
-    )
-    model.initialize_head(sequence_length=2, device="cpu")
-    model.eval()
-
-    onehot = torch.stack(
-        [
-            torch.from_numpy(sequence_to_onehot("AC").astype(np.float32)),
-            torch.from_numpy(sequence_to_onehot("GT").astype(np.float32)),
-        ],
-        dim=0,
-    )
-    organism_idx = torch.tensor([0, 1], dtype=torch.long)
-
-    direct = model(onehot, organism_idx)
-    predicted = model.predict_sequences(["AC", "GT"], organism_idx=organism_idx)
-
-    np.testing.assert_allclose(predicted.detach().numpy(), direct.detach().numpy(), rtol=1e-5, atol=1e-5)
-
-
-def test_predict_sequences_without_construct_mode_treats_inputs_as_final_sequences():
-    torch.manual_seed(0)
-    model = EncoderMPRAModel(
-        DummyAlphaGenome(),
-        MPRAHead(pooling_type="flatten", hidden_sizes=8),
-        construct_spec=ConstructSpec(left_adapter="A", right_adapter="C", promoter_seq="G", barcode_seq="T"),
-    )
-    model.initialize_head(sequence_length=4, device="cpu")
-    model.eval()
-
-    onehot = torch.from_numpy(sequence_to_onehot("acgt").astype(np.float32)).unsqueeze(0)
-    direct = model(onehot, torch.zeros(1, dtype=torch.long))
-    predicted = model.predict_sequences(["acgt"])
-
-    np.testing.assert_allclose(predicted.detach().numpy(), direct.detach().numpy(), rtol=1e-5, atol=1e-5)
-
-
-def test_predict_sequences_requires_construct_spec_when_construct_mode_is_set():
-    torch.manual_seed(0)
-    model = EncoderMPRAModel(
-        DummyAlphaGenome(),
-        MPRAHead(pooling_type="flatten", hidden_sizes=8),
-    )
-    model.initialize_head(sequence_length=2, device="cpu")
-
-    with pytest.raises(ValueError, match="construct_spec"):
-        model.predict_sequences(["AC"], construct_mode="promoter_barcode")
-
-
-def test_predict_sequences_rejects_mismatched_lengths():
-    torch.manual_seed(0)
-    model = EncoderMPRAModel(
-        DummyAlphaGenome(),
-        MPRAHead(pooling_type="flatten", hidden_sizes=8),
-    )
-    model.initialize_head(sequence_length=2, device="cpu")
-
-    with pytest.raises(ValueError, match="same length"):
-        model.predict_sequences(["A", "AC"])
+def test_deepstarr_construct_layout():
+    construct = DeepSTARRDeAlmeida2022Library.construct()
+    assert construct.length == 256
+    assert len(construct.assemble_sequence("A" * 249)) == 256
