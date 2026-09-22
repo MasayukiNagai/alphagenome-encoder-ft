@@ -112,10 +112,9 @@ construct expects. A row whose flanks are not the expected ones raises and names
 The individual pieces live in `alphagenome_encoder_ft.constructs` rather than the top-level API, for composing a layout of your own, such as an ablation that drops the barcode:
 
 ```python
-from alphagenome_encoder_ft import Construct
 from alphagenome_encoder_ft import Construct, LentiMPRAAgarwal2025Library as Agarwal2025
 
-promoter_only = Construct(suffix=Agarwal2025.PROMOTER, length=Agarwal2025.INPUT_BP)
+promoter_only = Construct(suffix=Agarwal2025.PROMOTER, length=Agarwal2025.INPUT_LENGTH)
 ```
 
 ## Scoring inserts

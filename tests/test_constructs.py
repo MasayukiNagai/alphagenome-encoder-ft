@@ -129,9 +129,9 @@ def test_to_dict_from_dict_roundtrip():
 
 def test_lentimpra_construct_wraps_the_element_in_the_whole_reporter():
     construct = AGARWAL.construct()
-    assembled = construct.assemble_sequence("A" * AGARWAL.ELEMENT_BP)
+    assembled = construct.assemble_sequence("A" * AGARWAL.INSERT_LENGTH)
 
-    assert construct.length == AGARWAL.INPUT_BP == 281
+    assert construct.length == AGARWAL.INPUT_LENGTH == 281
     # 15 + 200 + 15 + 36 + 15 = 281, so nothing is trimmed or padded.
     assert len(assembled) == 281
     assert "N" not in assembled

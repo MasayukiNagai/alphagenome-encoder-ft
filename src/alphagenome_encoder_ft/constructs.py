@@ -176,17 +176,17 @@ class LentiMPRAAgarwal2025Library:
     RIGHT_ADAPTER = "CATTGCGTGAACCGA"
     PROMOTER = "TCCATTATATACCCTCTAGTGTCGGTTCACGCAATG"
     BARCODE = "AGAGACTGAGGCCAC"
-    ELEMENT_BP = 200
-    INPUT_BP = 281
+    INSERT_LENGTH = 200
+    INPUT_LENGTH = 281
 
     @classmethod
     def construct(cls) -> Construct:
-        """``left adapter + element + right adapter + minP + barcode``."""
+        """``left adapter + insert + right adapter + minP + barcode``."""
 
         return Construct(
             prefix=cls.LEFT_ADAPTER,
             suffix=cls.RIGHT_ADAPTER + cls.PROMOTER + cls.BARCODE,
-            length=cls.INPUT_BP,
+            length=cls.INPUT_LENGTH,
         )
 
 
@@ -195,10 +195,10 @@ class DeepSTARRDeAlmeida2022Library:
 
     ADAPTER_UP = "TCCCTACACGACGCTCTTCCGATCT"
     ADAPTER_DOWN = "AGATCGGAAGAGCACACGTCTGAACT"
-    INPUT_BP = 256
+    INPUT_LENGTH = 256
 
     @classmethod
     def construct(cls) -> Construct:
         """``adapter + insert + adapter``, windowed to 256 bp."""
 
-        return Construct(prefix=cls.ADAPTER_UP, suffix=cls.ADAPTER_DOWN, length=cls.INPUT_BP)
+        return Construct(prefix=cls.ADAPTER_UP, suffix=cls.ADAPTER_DOWN, length=cls.INPUT_LENGTH)
