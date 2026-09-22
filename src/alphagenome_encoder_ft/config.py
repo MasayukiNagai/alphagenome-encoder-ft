@@ -211,17 +211,6 @@ class TrainConfig:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
-    def head_kwargs(self) -> dict[str, Any]:
-        return {
-            "pooling_type": self.head.pooling_type,
-            "center_bp": self.head.center_bp,
-            "hidden_sizes": list(self.head.hidden_sizes),
-            "dropout": self.head.dropout,
-            "activation": self.head.activation,
-            "num_outputs": self.head.num_outputs,
-            "norm_type": self.head.norm_type,
-        }
-
     @classmethod
     def from_dict(cls, raw_config: Mapping[str, Any]) -> "TrainConfig":
         allowed_sections = {"data", "head", "optim", "stage", "checkpoint", "logging", "runtime"}
@@ -287,3 +276,36 @@ def build_head(head_type: str, head_config: Mapping[str, Any]):
         if k in accepted and v is not None
     }
     return cls(**kwargs)
+
+
+def head_type_of(head: Any) -> str:
+    """The ``build_head`` name for a head instance, for writing a checkpoint.
+
+    ``DeepSTARRHead`` subclasses ``MPRAHead``, so the subclass is checked first.
+    """
+
+    from .heads import DeepSTARRHead, MPRAHead
+
+    if isinstance(head, DeepSTARRHead):
+        return "deepstarr"
+    if isinstance(head, MPRAHead):
+        return "mpra"
+    raise ValueError(f"Cannot name the head_type of {type(head).__name__}")
+
+
+def head_kwargs_of(head: Any) -> dict[str, Any]:
+    """``build_head`` arguments read off the head module itself.
+
+    Same fields as :meth:`TrainConfig.head_kwargs`, taken from the head that was actually
+    built so a checkpoint cannot record an architecture the weights do not match.
+    """
+
+    return {
+        "pooling_type": head.pooling_type,
+        "center_bp": head.center_bp,
+        "hidden_sizes": list(head.hidden_sizes),
+        "dropout": head.dropout,
+        "activation": head.activation,
+        "num_outputs": head.num_outputs,
+        "norm_type": head.norm_type,
+    }

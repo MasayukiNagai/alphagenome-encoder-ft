@@ -45,7 +45,7 @@ def _progress_iterator(iterable, *, total: int | None, show_progress: bool) -> t
         return iterable, False
     return tqdm(iterable, total=total, desc="train", leave=False), True
 
-from .config import OptimConfig, TrainConfig
+from .config import OptimConfig, TrainConfig, head_kwargs_of, head_type_of
 from .metrics import per_track, pearsonr
 from .model import AlphaGenomeEncoderModel
 
@@ -265,16 +265,15 @@ def save_checkpoint(
     path: str | Path,
     model: AlphaGenomeEncoderModel,
     *,
-    config: TrainConfig,
     save_mode: str,
-    stage: str,
-    epoch: int,
-    metrics: dict[str, Any] | None = None,
+    config: TrainConfig | None = None,
 ) -> Path:
     """Save a checkpoint following the repo checkpoint contract.
 
-    The payload carries the model's ``construct`` (or ``None``) and ``input_length`` so
-    ``AlphaGenomeEncoderModel.from_checkpoint`` can rebuild the head and score raw inserts.
+    The payload carries the model's ``construct`` (or ``None``), its ``input_length`` and the
+    architecture of the head that was built, so ``AlphaGenomeEncoderModel.from_checkpoint``
+    can rebuild the head and score raw inserts. ``config`` is optional provenance: nothing in
+    loading reads it, and a model fine-tuned outside :mod:`cli` has no ``TrainConfig`` to give.
     """
 
     if model.input_length is None:
@@ -285,16 +284,14 @@ def save_checkpoint(
 
     payload: dict[str, Any] = {
         "save_mode": save_mode,
-        "stage": stage,
-        "epoch": epoch,
-        "config": config.to_dict(),
-        "head_type": config.head.head_type,
+        "head_type": head_type_of(model.head),
         "head_state_dict": model.head.state_dict(),
-        "head_config": config.head_kwargs(),
+        "head_config": head_kwargs_of(model.head),
         "construct": model.construct.to_dict() if model.construct is not None else None,
         "input_length": int(model.input_length),
-        "metrics": metrics or {},
     }
+    if config is not None:
+        payload["config"] = config.to_dict()
 
     if save_mode == "minimal":
         payload["encoder_state_dict"] = model.encoder.state_dict()
@@ -442,11 +439,8 @@ def run_training_stage(
                     best_checkpoint_path = save_checkpoint(
                         stage_dir / "best.pt",
                         model,
-                        config=config,
                         save_mode=config.checkpoint.save_mode,
-                        stage=stage,
-                        epoch=current_epoch,
-                        metrics=val_metrics,
+                        config=config,
                     )
             else:
                 evals_without_improvement += 1
@@ -485,11 +479,8 @@ def run_training_stage(
                     best_checkpoint_path = save_checkpoint(
                         stage_dir / "best.pt",
                         model,
-                        config=config,
                         save_mode=config.checkpoint.save_mode,
-                        stage=stage,
-                        epoch=epoch_number,
-                        metrics=latest_eval_metrics,
+                        config=config,
                     )
             else:
                 evals_without_improvement += 1

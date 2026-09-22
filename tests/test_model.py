@@ -116,10 +116,8 @@ def test_checkpoint_roundtrip_restores_construct_and_input_length(tmp_path: Path
     path = save_checkpoint(
         tmp_path / f"{save_mode}.pt",
         model,
-        config=make_config(tmp_path, save_mode=save_mode),
         save_mode=save_mode,
-        stage="stage1",
-        epoch=1,
+        config=make_config(tmp_path, save_mode=save_mode),
     )
     restored = AlphaGenomeEncoderModel.from_checkpoint(
         path, device="cpu", backbone_factory=DummyAlphaGenome
@@ -137,10 +135,8 @@ def test_checkpoint_roundtrip_without_a_construct(tmp_path: Path):
     path = save_checkpoint(
         tmp_path / "no_construct.pt",
         model,
-        config=make_config(tmp_path),
         save_mode="minimal",
-        stage="stage1",
-        epoch=1,
+        config=make_config(tmp_path),
     )
     restored = AlphaGenomeEncoderModel.from_checkpoint(
         path, device="cpu", backbone_factory=DummyAlphaGenome
@@ -149,15 +145,51 @@ def test_checkpoint_roundtrip_without_a_construct(tmp_path: Path):
     assert restored.input_length == 4
 
 
+def test_model_save_checkpoint_round_trips_without_a_config(tmp_path: Path):
+    construct = Construct(prefix="A", suffix="GT", length=6)
+    model = _make_model(construct, input_length=6)
+    before = model.predict_inserts(["cc"])
+
+    path = model.save_checkpoint(tmp_path / "no_config.pt")
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    assert not {"config", "stage", "epoch", "metrics"} & payload.keys()
+
+    restored = AlphaGenomeEncoderModel.from_checkpoint(
+        path, device="cpu", backbone_factory=DummyAlphaGenome
+    )
+    assert restored.construct == construct
+    np.testing.assert_allclose(
+        restored.predict_inserts(["cc"]).numpy(), before.numpy(), rtol=1e-5, atol=1e-5
+    )
+
+
+def test_head_config_is_read_from_the_head_not_the_config(tmp_path: Path):
+    """A config that disagrees with the built head must not decide what is restored."""
+
+    model = _make_model(None, input_length=4)  # the head was built with hidden_sizes [8]
+    path = save_checkpoint(
+        tmp_path / "mismatched.pt",
+        model,
+        save_mode="minimal",
+        config=make_config(tmp_path, head={"hidden_sizes": [1024]}),
+    )
+
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    assert payload["head_config"]["hidden_sizes"] == [8]
+
+    restored = AlphaGenomeEncoderModel.from_checkpoint(
+        path, device="cpu", backbone_factory=DummyAlphaGenome
+    )
+    assert restored.head.hidden_sizes == [8]
+
+
 def test_from_checkpoint_rejects_a_v0_payload(tmp_path: Path):
     model = _make_model(Construct(length=4), input_length=4)
     path = save_checkpoint(
         tmp_path / "v0.pt",
         model,
-        config=make_config(tmp_path),
         save_mode="minimal",
-        stage="stage1",
-        epoch=1,
+        config=make_config(tmp_path),
     )
     payload = torch.load(path, map_location="cpu", weights_only=False)
     payload.pop("construct")
@@ -176,10 +208,8 @@ def test_from_checkpoint_rejects_head_only(tmp_path: Path):
     path = save_checkpoint(
         tmp_path / "head_only.pt",
         model,
-        config=make_config(tmp_path, save_mode="head"),
         save_mode="head",
-        stage="stage1",
-        epoch=1,
+        config=make_config(tmp_path, save_mode="head"),
     )
     with pytest.raises(ValueError, match="Head-only checkpoints"):
         AlphaGenomeEncoderModel.from_checkpoint(
@@ -193,8 +223,6 @@ def test_save_checkpoint_requires_an_initialized_head(tmp_path: Path):
         save_checkpoint(
             tmp_path / "uninitialized.pt",
             model,
-            config=make_config(tmp_path),
             save_mode="minimal",
-            stage="stage1",
-            epoch=1,
+            config=make_config(tmp_path),
         )

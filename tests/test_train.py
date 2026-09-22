@@ -410,11 +410,8 @@ def test_save_checkpoint_persists_head_type_mpra_default(tmp_path: Path):
     path = save_checkpoint(
         tmp_path / "mpra.pt",
         model,
-        config=config,
         save_mode="minimal",
-        stage="stage1",
-        epoch=1,
-        metrics={"pearson": 0.5},
+        config=config,
     )
     payload = torch.load(path, map_location="cpu", weights_only=False)
     assert payload["head_type"] == "mpra"
@@ -426,10 +423,8 @@ def test_save_checkpoint_persists_the_construct_and_input_length(tmp_path: Path)
     path = save_checkpoint(
         tmp_path / "with_construct.pt",
         _make_model(construct),
-        config=_make_config(tmp_path),
         save_mode="minimal",
-        stage="stage1",
-        epoch=1,
+        config=_make_config(tmp_path),
     )
     payload = torch.load(path, map_location="cpu", weights_only=False)
 
@@ -443,10 +438,8 @@ def test_save_checkpoint_records_a_null_construct(tmp_path: Path):
     path = save_checkpoint(
         tmp_path / "no_construct.pt",
         _make_model(),
-        config=_make_config(tmp_path),
         save_mode="minimal",
-        stage="stage1",
-        epoch=1,
+        config=_make_config(tmp_path),
     )
     payload = torch.load(path, map_location="cpu", weights_only=False)
 
@@ -489,10 +482,8 @@ def test_save_checkpoint_persists_head_type_deepstarr(tmp_path: Path):
     path = save_checkpoint(
         tmp_path / "deepstarr.pt",
         model,
-        config=config,
         save_mode="minimal",
-        stage="stage1",
-        epoch=1,
+        config=config,
     )
     payload = torch.load(path, map_location="cpu", weights_only=False)
     assert payload["head_type"] == "deepstarr"
