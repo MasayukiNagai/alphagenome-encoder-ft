@@ -148,6 +148,7 @@ construct.assemble_onehot(insert_onehot)     # -> Tensor, differentiable
 | `prefix` | fixed sequence before the insert |
 | `suffix` | fixed sequence after the insert |
 | `length` | optional fixed model input length |
+| `window_start` | optional index into `prefix + insert + suffix` where the window begins; default centred |
 
 With `length` set, the assembled sequence is windowed to exactly that many bases. Longer sequences are trimmed from both ends; shorter ones are padded with `N` (an all-zero one-hot) on both ends. When the amount is odd, the extra base goes on the suffix side:
 
@@ -157,6 +158,15 @@ prefix + insert + suffix = 10 bp, length=13  ->  pad  1 left, 2 right
 ```
 
 `offset` slides that window and is the training-time shift augmentation. The dataset draws it per item; inference leaves it at 0, so predictions use the exact centered layout the model was trained on. Because a window rather than a roll does the shifting, sequence never wraps from one end to the other.
+
+With a centred window, a shift past the ends of the flanks brings in `N`. When more of the real reporter is known than the window shows, pass it all as flanks and set `window_start` to fix where the window begins. At offset 0 the window then covers `window_start` to `window_start + length`, and a shift slides over the real flank. `N` appears only where the window runs past the flanks:
+
+```python
+# 300 bp flanks; the window keeps 29 bp of upstream vector before a 200 bp insert
+Construct(prefix=UPSTREAM, suffix=DOWNSTREAM, length=384, window_start=300 - 29)
+```
+
+`window_start` must lie within the prefix. The window must also contain the whole insert at every offset used; `MPRADataset` checks the longest insert against `max_shift` at load time. The left edge stays fixed, so a shorter insert keeps the same upstream bases and takes more of the suffix. A construct without `window_start` behaves and serializes exactly as before.
 
 ### Presets
 

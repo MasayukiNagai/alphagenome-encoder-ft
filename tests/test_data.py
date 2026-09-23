@@ -298,3 +298,21 @@ def test_strip_flanks_is_reusable_on_plain_sequences():
     assert strip_flanks(["AAtttGG"], "AA", "GG") == ["TTT"]
     with pytest.raises(ValueError, match="does not carry the expected flanks"):
         strip_flanks(["CCtttGG"], "AA", "GG")
+
+
+def test_dataset_rejects_a_fixed_window_that_jitter_would_cut():
+    construct = Construct(prefix="AAAA", suffix="GGGG", length=6, window_start=2)
+    MPRADataset(["CCCC"], [1.0], construct=construct)
+    with pytest.raises(ValueError, match="would be cut"):
+        MPRADataset(["CCCC"], [1.0], construct=construct, random_shift=True, max_shift=1)
+
+
+def test_dataset_jitter_over_a_fixed_window_uses_real_flank():
+    construct = Construct(prefix="ACGTACGT", suffix="TGCATGCA", length=8, window_start=6)
+    dataset = MPRADataset(
+        ["CCCC"], [1.0], construct=construct, random_shift=True, shift_prob=1.0, max_shift=2, seed=0
+    )
+    for _ in range(20):
+        onehot, _ = dataset[0]
+        assert onehot.shape == (8, 4)
+        assert bool((onehot.sum(dim=1) == 1).all()), "jitter introduced an N"
