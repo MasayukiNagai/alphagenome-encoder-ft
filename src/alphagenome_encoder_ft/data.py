@@ -59,6 +59,10 @@ class MPRADataset(Dataset[tuple[Tensor, Tensor]]):
         targets = np.asarray(targets, dtype=np.float32)
         if targets.shape[0] != len(inserts):
             raise ValueError(f"targets has {targets.shape[0]} rows but there are {len(inserts)} inserts")
+        if construct is not None and inserts:
+            # Fail at load time, not mid-epoch, if a fixed window would cut the longest insert
+            # at the largest jitter offset. A centred window returns immediately.
+            construct.check_insert_window(max(len(insert) for insert in inserts), max_shift if random_shift else 0)
 
         self.construct = construct
         self.reverse_complement = reverse_complement
