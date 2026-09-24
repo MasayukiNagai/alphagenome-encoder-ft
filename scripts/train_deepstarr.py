@@ -59,6 +59,7 @@ def main() -> dict[str, Any]:
         },
         show_progress=args.show_progress,
         resume_from_stage2=args.resume_from_stage2,
+        evaluate_test=args.evaluate_test,
     )
 
 

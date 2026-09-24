@@ -123,6 +123,13 @@ def add_train_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
         action="store_true",
         help="skip stage 1 and restart stage 2 from <checkpoint_dir>/stage1/best.pt",
     )
+    parser.add_argument(
+        "--evaluate_test",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="score each stage's best checkpoint on the test split after training "
+        "(default off: selection uses validation only, and the evaluate script scores test)",
+    )
     parser.add_argument("--show_progress", action=argparse.BooleanOptionalAction, default=False)
     return parser
 
@@ -211,6 +218,7 @@ def train(
     metadata: dict[str, Any] | None = None,
     show_progress: bool = False,
     resume_from_stage2: bool = False,
+    evaluate_test: bool = False,
 ) -> dict[str, Any]:
     """Two-stage fine-tune driven by ``config``, or stage 1 only when ``config.stage2`` is None.
 
@@ -218,6 +226,10 @@ def train(
     already carrying ``construct`` and the augmentation flags. ``metadata`` is recorded
     alongside the construct in ``run.json`` so evaluation can find the data again.
     ``resume_from_stage2`` skips stage 1 and restarts stage 2 from ``stage1/best.pt``.
+
+    The test split is not touched unless ``evaluate_test`` is set: training and checkpoint
+    selection use validation only, so hyperparameter search never sees test numbers. With
+    it set, each stage's best checkpoint is scored on test after training.
     """
 
     if resume_from_stage2 and config.stage2 is None:
@@ -232,7 +244,7 @@ def train(
 
     train_dataset = make_dataset("train")
     val_dataset = make_dataset("val")
-    test_dataset = make_dataset("test")
+    test_dataset = make_dataset("test") if evaluate_test else None
     if len(train_dataset) == 0:
         raise ValueError("Training split is empty")
 
@@ -291,10 +303,15 @@ def train(
             f"{config.data.batch_size}"
         )
     val_loader = create_dataloader(val_dataset, shuffle=False, **loader_kwargs)
-    test_loader = create_dataloader(test_dataset, shuffle=False, **loader_kwargs)
+    test_loader = (
+        create_dataloader(test_dataset, shuffle=False, **loader_kwargs) if test_dataset is not None else None
+    )
     print(f"  Train batches : {len(train_loader):,}")
     print(f"  Val batches   : {len(val_loader):,}")
-    print(f"  Test batches  : {len(test_loader):,}")
+    if test_loader is not None:
+        print(f"  Test batches  : {len(test_loader):,}")
+    else:
+        print("  Test          : not scored (pass --evaluate_test to score it after training)")
 
     stage1_optimizer = create_stage1_optimizer(config, model)
     stage1_scheduler = create_scheduler(config.stage1, stage1_optimizer)
@@ -335,6 +352,28 @@ def train(
             show_progress=show_progress,
         )
 
+    if test_loader is not None:
+        _score_test(results, model, test_loader, device, config, epoch_logger)
+    with open(run_dir / "history.json", "w") as handle:
+        json.dump(results["history"], handle, indent=2)
+
+    if config.logging.use_wandb:
+        import wandb
+
+        wandb.finish()
+    return results
+
+
+def _score_test(
+    results: dict[str, Any],
+    model: AlphaGenomeEncoderModel,
+    test_loader,
+    device: torch.device,
+    config: TrainConfig,
+    epoch_logger: Callable[[dict[str, Any]], None] | None,
+) -> None:
+    """Score each stage's best checkpoint on test, recording it in ``results`` and wandb."""
+
     stages: list[tuple[str, dict[str, Any]]] = [("stage1", results)]
     if "stage2" in results:
         stages = [("stage1", results["stage1"]), ("stage2", results["stage2"])]
@@ -368,14 +407,6 @@ def train(
     results["history"]["test_loss"].append(final_metrics["loss"])
     results["history"]["test_pearson"].append(final_metrics.get("pearson", float("nan")))
     results["history"]["test_epoch"].append(final_epoch)
-    with open(run_dir / "history.json", "w") as handle:
-        json.dump(results["history"], handle, indent=2)
-
-    if config.logging.use_wandb:
-        import wandb
-
-        wandb.finish()
-    return results
 
 
 def _wandb_logger(config: TrainConfig) -> Callable[[dict[str, Any]], None] | None:
