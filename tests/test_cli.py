@@ -68,3 +68,28 @@ def test_evaluate_test_flag_defaults_off():
     parser = cli.add_train_arguments(argparse.ArgumentParser())
     assert parser.parse_args([]).evaluate_test is False
     assert parser.parse_args(["--evaluate_test"]).evaluate_test is True
+
+
+def test_stage1_only_drops_the_stage2_section(tmp_path: Path):
+    import argparse
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(_two_stage_config(tmp_path).to_dict()))
+    parser = cli.add_train_arguments(argparse.ArgumentParser())
+
+    two_stage = cli.load_config(parser, parser.parse_args(["--config", str(config_path)]))
+    stage1_only = cli.load_config(parser, parser.parse_args(["--config", str(config_path), "--stage1_only"]))
+
+    assert two_stage.stage2 is not None
+    assert stage1_only.stage2 is None
+
+
+def test_stage1_only_trains_no_stage2(tmp_path: Path, dummy_backbone):
+    config = _two_stage_config(tmp_path)
+    config.stage2 = None
+
+    results = cli.train(config, construct=None, make_dataset=_datasets([]))
+
+    assert "stage2" not in results
+    assert (tmp_path / "stage1" / "best.pt").exists() and not (tmp_path / "stage2").exists()
+    assert json.loads((tmp_path / "config.json").read_text())["stage2"] is None
