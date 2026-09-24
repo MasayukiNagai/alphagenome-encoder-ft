@@ -58,6 +58,7 @@ def main() -> dict[str, Any]:
             "sequence_column": args.sequence_column,
         },
         show_progress=args.show_progress,
+        resume_from_stage2=args.resume_from_stage2,
     )
 
 

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import copy
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, ClassVar, Mapping
 
 
 def parse_hidden_sizes(value: int | str | list[int] | tuple[int, ...]) -> list[int]:
@@ -55,6 +55,8 @@ class DataConfig:
     subset_frac: float = 1.0
     num_workers: int = 0
     pin_memory: bool = False
+    # Training loader only: drop the last incomplete batch. Validation and test keep every row.
+    drop_last: bool = False
 
     def __post_init__(self) -> None:
         if not 0 < self.subset_frac <= 1:
@@ -73,10 +75,11 @@ class DataConfig:
 
 @dataclass
 class HeadConfig:
+    """Head architecture. Dropout is a training setting and lives on each stage instead."""
+
     pooling_type: str = "flatten"
     center_bp: int | None = None
     hidden_sizes: list[int] = field(default_factory=lambda: [1024])
-    dropout: float = 0.1
     activation: str = "relu"
     head_type: str = "mpra"
     num_outputs: int = 1
@@ -88,8 +91,6 @@ class HeadConfig:
             raise ValueError("head.pooling_type must be one of flatten, center, mean, sum, max")
         if self.center_bp is not None and self.center_bp <= 0:
             raise ValueError("head.center_bp must be > 0")
-        if not 0 <= self.dropout < 1:
-            raise ValueError("head.dropout must be in [0, 1)")
         if self.activation not in {"relu", "gelu"}:
             raise ValueError("head.activation must be 'relu' or 'gelu'")
         if self.head_type not in {"mpra", "deepstarr"}:
@@ -102,34 +103,18 @@ class HeadConfig:
 
 @dataclass
 class OptimConfig:
+    """Optimizer settings shared by both stages. Learning rates and schedules are per stage."""
+
     optimizer: str = "adamw"
-    learning_rate: float = 1e-3
     weight_decay: float = 0.0
-    lr_scheduler: str = "constant"
-    plateau_factor: float = 0.5
-    plateau_patience: int = 2
-    plateau_mode: str = "min"
-    plateau_min_lr: float = 0.0
     gradient_accumulation_steps: int = 1
     gradient_clip: float | None = None
 
     def __post_init__(self) -> None:
         if self.optimizer not in {"adam", "adamw"}:
             raise ValueError("optim.optimizer must be 'adam' or 'adamw'")
-        if self.learning_rate <= 0:
-            raise ValueError("optim.learning_rate must be > 0")
         if self.weight_decay < 0:
             raise ValueError("optim.weight_decay must be >= 0")
-        if self.lr_scheduler not in {"constant", "cosine", "plateau"}:
-            raise ValueError("optim.lr_scheduler must be one of constant, cosine, plateau")
-        if not 0 < self.plateau_factor < 1:
-            raise ValueError("optim.plateau_factor must be in (0, 1)")
-        if self.plateau_patience < 0:
-            raise ValueError("optim.plateau_patience must be >= 0")
-        if self.plateau_mode != "min":
-            raise ValueError("optim.plateau_mode must be 'min'")
-        if self.plateau_min_lr < 0:
-            raise ValueError("optim.plateau_min_lr must be >= 0")
         if self.gradient_accumulation_steps <= 0:
             raise ValueError("optim.gradient_accumulation_steps must be > 0")
         if self.gradient_clip is not None and self.gradient_clip <= 0:
@@ -138,35 +123,60 @@ class OptimConfig:
 
 @dataclass
 class StageConfig:
+    """One training stage, complete: nothing is inherited from the other stage.
+
+    Stage 1 trains the head with the encoder frozen. ``early_stopping_patience`` counts
+    epochs and is converted to ``patience * val_evals_per_epoch`` evaluations. The plateau
+    fields apply only when ``lr_scheduler`` is ``plateau``, which steps on validation loss.
+    """
+
+    SECTION: ClassVar[str] = "stage1"
+
     num_epochs: int = 10
     early_stopping_patience: int = 5
     val_evals_per_epoch: int = 1
-    second_stage_lr: float | None = None
-    second_stage_epochs: int = 10
-    second_stage_dropout: float | None = None
-    second_stage_lr_scheduler: str | None = None
-    resume_from_stage2: bool = False
+    head_lr: float = 1e-3
+    dropout: float = 0.1
+    lr_scheduler: str = "constant"
+    plateau_factor: float = 0.5
+    plateau_patience: int = 2
+    plateau_min_lr: float = 0.0
 
     def __post_init__(self) -> None:
+        s = self.SECTION
         if self.num_epochs <= 0:
-            raise ValueError("stage.num_epochs must be > 0")
+            raise ValueError(f"{s}.num_epochs must be > 0")
         if self.early_stopping_patience < 0:
-            raise ValueError("stage.early_stopping_patience must be >= 0")
+            raise ValueError(f"{s}.early_stopping_patience must be >= 0")
         if self.val_evals_per_epoch <= 0:
-            raise ValueError("stage.val_evals_per_epoch must be > 0")
-        if self.second_stage_lr is not None and self.second_stage_lr <= 0:
-            raise ValueError("stage.second_stage_lr must be > 0 when set")
-        if self.second_stage_epochs <= 0:
-            raise ValueError("stage.second_stage_epochs must be > 0")
-        if self.second_stage_dropout is not None and not 0 <= self.second_stage_dropout < 1:
-            raise ValueError("stage.second_stage_dropout must be in [0, 1) when set")
-        if (
-            self.second_stage_lr_scheduler is not None
-            and self.second_stage_lr_scheduler not in {"constant", "cosine", "plateau"}
-        ):
-            raise ValueError(
-                "stage.second_stage_lr_scheduler must be one of constant, cosine, plateau"
-            )
+            raise ValueError(f"{s}.val_evals_per_epoch must be > 0")
+        if self.head_lr <= 0:
+            raise ValueError(f"{s}.head_lr must be > 0")
+        if not 0 <= self.dropout < 1:
+            raise ValueError(f"{s}.dropout must be in [0, 1)")
+        if self.lr_scheduler not in {"constant", "cosine", "plateau"}:
+            raise ValueError(f"{s}.lr_scheduler must be one of constant, cosine, plateau")
+        if not 0 < self.plateau_factor < 1:
+            raise ValueError(f"{s}.plateau_factor must be in (0, 1)")
+        if self.plateau_patience < 0:
+            raise ValueError(f"{s}.plateau_patience must be >= 0")
+        if self.plateau_min_lr < 0:
+            raise ValueError(f"{s}.plateau_min_lr must be >= 0")
+
+
+@dataclass
+class Stage2Config(StageConfig):
+    """Stage 2: the encoder is unfrozen and trains at ``encoder_lr``, the head at ``head_lr``."""
+
+    SECTION: ClassVar[str] = "stage2"
+
+    head_lr: float = 1e-5
+    encoder_lr: float = 1e-5
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.encoder_lr <= 0:
+            raise ValueError("stage2.encoder_lr must be > 0")
 
 
 @dataclass
@@ -194,12 +204,36 @@ class RuntimeConfig:
     seed: int = 42
 
 
+# The flat ``stage`` section and the stage-2 overrides it held were replaced by two complete
+# stage sections. A config written for the old layout fails with this map rather than with
+# an unexpected-keyword error.
+_OLD_LAYOUT_HINT = (
+    "the 'stage' section was split into 'stage1' and 'stage2' (null for a single stage). "
+    "optim.learning_rate -> stage1.head_lr; stage.second_stage_lr -> stage2.encoder_lr and "
+    "stage2.head_lr; stage.second_stage_* -> stage2.*; head.dropout -> stage1.dropout / "
+    "stage2.dropout; optim.lr_scheduler and optim.plateau_* -> per stage; "
+    "stage.resume_from_stage2 -> the --resume_from_stage2 flag; optim.plateau_mode was removed"
+)
+
+
+def _build_section(cls, raw: Any, section: str):
+    values = dict(_ensure_mapping(raw, section=section))
+    accepted = {f.name for f in fields(cls)}
+    unknown = sorted(key for key in values if key not in accepted and not str(key).startswith("_"))
+    if unknown:
+        raise ValueError(f"Unknown keys in '{section}': {', '.join(unknown)}")
+    return cls(**{key: value for key, value in values.items() if key in accepted})
+
+
 @dataclass
 class TrainConfig:
+    """Every training setting. ``stage2`` set runs two stages; ``None`` runs stage 1 only."""
+
     data: DataConfig = field(default_factory=DataConfig)
     head: HeadConfig = field(default_factory=HeadConfig)
     optim: OptimConfig = field(default_factory=OptimConfig)
-    stage: StageConfig = field(default_factory=StageConfig)
+    stage1: StageConfig = field(default_factory=StageConfig)
+    stage2: Stage2Config | None = None
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
@@ -213,24 +247,29 @@ class TrainConfig:
 
     @classmethod
     def from_dict(cls, raw_config: Mapping[str, Any]) -> "TrainConfig":
-        allowed_sections = {"data", "head", "optim", "stage", "checkpoint", "logging", "runtime"}
+        if "stage" in raw_config:
+            raise ValueError(f"Old config layout: {_OLD_LAYOUT_HINT}")
+        sections = {
+            "data": DataConfig,
+            "head": HeadConfig,
+            "optim": OptimConfig,
+            "stage1": StageConfig,
+            "checkpoint": CheckpointConfig,
+            "logging": LoggingConfig,
+            "runtime": RuntimeConfig,
+        }
         unknown_sections = sorted(
-            key for key in set(raw_config) - allowed_sections if not str(key).startswith("_")
+            key
+            for key in set(raw_config) - set(sections) - {"stage2"}
+            if not str(key).startswith("_")
         )
         if unknown_sections:
             raise ValueError(f"Unknown config sections: {', '.join(unknown_sections)}")
 
-        return cls(
-            data=DataConfig(**dict(_ensure_mapping(raw_config.get("data", {}), section="data"))),
-            head=HeadConfig(**dict(_ensure_mapping(raw_config.get("head", {}), section="head"))),
-            optim=OptimConfig(**dict(_ensure_mapping(raw_config.get("optim", {}), section="optim"))),
-            stage=StageConfig(**dict(_ensure_mapping(raw_config.get("stage", {}), section="stage"))),
-            checkpoint=CheckpointConfig(
-                **dict(_ensure_mapping(raw_config.get("checkpoint", {}), section="checkpoint"))
-            ),
-            logging=LoggingConfig(**dict(_ensure_mapping(raw_config.get("logging", {}), section="logging"))),
-            runtime=RuntimeConfig(**dict(_ensure_mapping(raw_config.get("runtime", {}), section="runtime"))),
-        )
+        built = {name: _build_section(section_cls, raw_config.get(name, {}), name) for name, section_cls in sections.items()}
+        raw_stage2 = raw_config.get("stage2")
+        stage2 = None if raw_stage2 is None else _build_section(Stage2Config, raw_stage2, "stage2")
+        return cls(**built, stage2=stage2)
 
 
 def load_train_config(path: str | Path | None) -> TrainConfig:

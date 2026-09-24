@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import math
 from contextlib import nullcontext
-from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -45,7 +44,7 @@ def _progress_iterator(iterable, *, total: int | None, show_progress: bool) -> t
         return iterable, False
     return tqdm(iterable, total=total, desc="train", leave=False), True
 
-from .config import OptimConfig, TrainConfig, head_kwargs_of, head_type_of
+from .config import OptimConfig, StageConfig, TrainConfig, head_kwargs_of, head_type_of
 from .metrics import per_track, pearsonr
 from .model import AlphaGenomeEncoderModel
 
@@ -89,35 +88,78 @@ def set_encoder_trainable(model: AlphaGenomeEncoderModel, trainable: bool) -> No
     model.set_encoder_trainable(trainable)
 
 
+def encoder_head_param_groups(
+    model: AlphaGenomeEncoderModel,
+    *,
+    encoder_lr: float,
+    head_lr: float,
+) -> list[dict[str, Any]]:
+    """Trainable encoder and head parameters as two optimizer groups, each at its own rate.
+
+    Parameters with ``requires_grad`` off are left out, so a frozen encoder contributes an
+    empty group, which is dropped.
+    """
+
+    encoder = [p for p in model.encoder.parameters() if p.requires_grad]
+    encoder_ids = {id(p) for p in encoder}
+    head = [p for p in model.head.parameters() if p.requires_grad and id(p) not in encoder_ids]
+    groups = [{"params": encoder, "lr": encoder_lr}, {"params": head, "lr": head_lr}]
+    return [group for group in groups if group["params"]]
+
+
 def create_optimizer(
     optim_config: OptimConfig,
     params,
     *,
-    learning_rate: float | None = None,
+    learning_rate: float,
 ) -> torch.optim.Optimizer:
-    lr = optim_config.learning_rate if learning_rate is None else learning_rate
+    """Adam or AdamW over ``params``: a parameter list, or groups that set their own ``lr``.
+
+    ``learning_rate`` applies to groups without one.
+    """
+
+    lr = learning_rate
     if optim_config.optimizer == "adam":
         return Adam(params, lr=lr, weight_decay=optim_config.weight_decay)
     return AdamW(params, lr=lr, weight_decay=optim_config.weight_decay)
 
 
-def create_scheduler(
-    optim_config: OptimConfig,
-    optimizer: torch.optim.Optimizer,
-    total_epochs: int,
-):
-    lr_scheduler = optim_config.lr_scheduler
+def create_stage1_optimizer(config: TrainConfig, model: AlphaGenomeEncoderModel) -> torch.optim.Optimizer:
+    """Stage-1 optimizer: the head alone at ``stage1.head_lr``."""
+
+    return create_optimizer(
+        config.optim, model.trainable_parameters(include_encoder=False), learning_rate=config.stage1.head_lr
+    )
+
+
+def create_stage2_optimizer(config: TrainConfig, model: AlphaGenomeEncoderModel) -> torch.optim.Optimizer:
+    """Stage-2 optimizer: encoder at ``stage2.encoder_lr``, head at ``stage2.head_lr``."""
+
+    stage2 = config.stage2
+    if stage2 is None:
+        raise ValueError("stage2 must be set for stage 2")
+    groups = encoder_head_param_groups(model, encoder_lr=stage2.encoder_lr, head_lr=stage2.head_lr)
+    return create_optimizer(config.optim, groups, learning_rate=stage2.encoder_lr)
+
+
+def create_scheduler(stage_config: StageConfig, optimizer: torch.optim.Optimizer):
+    """The stage's ``lr_scheduler`` over ``optimizer``; ``None`` for a constant rate.
+
+    Cosine anneals over ``num_epochs``. Plateau steps on validation loss.
+    """
+
+    lr_scheduler = stage_config.lr_scheduler
     if lr_scheduler == "constant":
         return None
     if lr_scheduler == "cosine":
-        return CosineAnnealingLR(optimizer, T_max=max(1, total_epochs))
+        return CosineAnnealingLR(optimizer, T_max=max(1, stage_config.num_epochs))
     if lr_scheduler == "plateau":
         return ReduceLROnPlateau(
             optimizer,
-            mode=optim_config.plateau_mode,
-            factor=optim_config.plateau_factor,
-            patience=optim_config.plateau_patience,
-            min_lr=optim_config.plateau_min_lr,
+            mode="min",
+            factor=stage_config.plateau_factor,
+            patience=stage_config.plateau_patience,
+            min_lr=stage_config.plateau_min_lr,
         )
     raise ValueError(f"Unknown lr_scheduler: {lr_scheduler}")
 
@@ -360,8 +402,8 @@ def run_training_stage(
     *,
     optimizer: torch.optim.Optimizer,
     config: TrainConfig,
+    stage_config: StageConfig,
     device: torch.device | str,
-    num_epochs: int,
     stage: str,
     train_encoder: bool,
     val_loader=None,
@@ -374,10 +416,17 @@ def run_training_stage(
     epoch_callback: Callable[[dict[str, Any]], None] | None = None,
     show_progress: bool = False,
 ) -> dict[str, Any]:
-    """Run a single training stage."""
+    """Run one training stage under ``stage_config``: its epochs, early stopping and dropout.
+
+    ``config`` supplies what the stages share (gradient accumulation and clipping, AMP, the
+    checkpoint save mode).
+    """
 
     device = torch.device(device)
     scheduler_step = scheduler_step or _default_scheduler_step
+    model.head.dropout = stage_config.dropout
+    num_epochs = stage_config.num_epochs
+    val_evals_per_epoch = stage_config.val_evals_per_epoch
     stage_dir = Path(checkpoint_dir) if checkpoint_dir is not None else None
     if stage_dir is not None:
         stage_dir.mkdir(parents=True, exist_ok=True)
@@ -391,9 +440,9 @@ def run_training_stage(
     for epoch_idx in range(num_epochs):
         epoch_number = start_epoch + epoch_idx + 1
         num_train_batches = len(train_loader)
-        if val_loader is not None and config.stage.val_evals_per_epoch > 1:
-            val_eval_interval = max(1, num_train_batches // config.stage.val_evals_per_epoch)
-            val_eval_points = [i * val_eval_interval for i in range(1, config.stage.val_evals_per_epoch + 1)]
+        if val_loader is not None and val_evals_per_epoch > 1:
+            val_eval_interval = max(1, num_train_batches // val_evals_per_epoch)
+            val_eval_points = [i * val_eval_interval for i in range(1, val_evals_per_epoch + 1)]
             val_eval_points = [min(point, num_train_batches) for point in val_eval_points]
             val_eval_points = sorted(set(val_eval_points))
         else:
@@ -445,7 +494,7 @@ def run_training_stage(
             else:
                 evals_without_improvement += 1
 
-            patience_in_evals = config.stage.early_stopping_patience * config.stage.val_evals_per_epoch
+            patience_in_evals = stage_config.early_stopping_patience * val_evals_per_epoch
             if evals_without_improvement >= patience_in_evals:
                 should_stop = True
                 return False
@@ -537,11 +586,17 @@ def run_two_stage_training(
     metric_fns: dict[str, Callable[[Tensor, Tensor], Tensor | float]] | None = None,
     epoch_callback: Callable[[dict[str, Any]], None] | None = None,
     show_progress: bool = False,
+    resume_from_stage2: bool = False,
 ) -> dict[str, Any]:
-    """Run stage 1 head-only training followed by stage 2 encoder+head training."""
+    """Run stage 1 head-only training followed by stage 2 encoder+head training.
 
-    if config.stage.second_stage_lr is None:
-        raise ValueError("stage.second_stage_lr must be set for two-stage training")
+    Each stage runs under its own section, ``config.stage1`` and ``config.stage2``.
+    ``resume_from_stage2`` skips stage 1 and starts stage 2 from ``stage1/best.pt``. The
+    stage-2 scheduler is built from ``config.stage2`` unless a factory is given.
+    """
+
+    if config.stage2 is None:
+        raise ValueError("stage2 must be set for two-stage training")
     if stage2_optimizer_factory is None:
         raise ValueError("stage2_optimizer_factory is required for two-stage training")
     if config.checkpoint.save_mode == "head":
@@ -555,15 +610,15 @@ def run_two_stage_training(
     stage2_dir = checkpoint_dir / "stage2"
     stage1_result: dict[str, Any]
 
-    if not config.stage.resume_from_stage2:
+    if not resume_from_stage2:
         model.set_encoder_trainable(False)
         stage1_result = run_training_stage(
             model,
             train_loader,
             optimizer=stage1_optimizer,
             config=config,
+            stage_config=config.stage1,
             device=device,
-            num_epochs=config.stage.num_epochs,
             stage="stage1",
             train_encoder=False,
             val_loader=val_loader,
@@ -591,33 +646,21 @@ def run_two_stage_training(
     best_stage1_path = stage1_result["best_checkpoint_path"] or str(stage1_dir / "best.pt")
     load_checkpoint(best_stage1_path, model)
 
-    if config.stage.second_stage_dropout is not None:
-        model.head.dropout = config.stage.second_stage_dropout
-
     model.set_encoder_trainable(True)
     stage2_optimizer = stage2_optimizer_factory(model)
     if stage2_scheduler_factory is not None:
         stage2_scheduler = stage2_scheduler_factory(stage2_optimizer)
-    elif config.stage.second_stage_lr_scheduler is not None:
-        stage2_optim_config = replace(
-            config.optim,
-            lr_scheduler=config.stage.second_stage_lr_scheduler,
-            learning_rate=config.stage.second_stage_lr,
-        )
-        stage2_scheduler = create_scheduler(
-            stage2_optim_config, stage2_optimizer, config.stage.second_stage_epochs
-        )
-        if stage2_scheduler_step is None:
-            stage2_scheduler_step = scheduler_stepper(config.stage.second_stage_lr_scheduler)
     else:
-        stage2_scheduler = None
+        stage2_scheduler = create_scheduler(config.stage2, stage2_optimizer)
+        if stage2_scheduler_step is None:
+            stage2_scheduler_step = scheduler_stepper(config.stage2.lr_scheduler)
     stage2_result = run_training_stage(
         model,
         train_loader,
         optimizer=stage2_optimizer,
         config=config,
+        stage_config=config.stage2,
         device=device,
-        num_epochs=config.stage.second_stage_epochs,
         stage="stage2",
         train_encoder=True,
         val_loader=val_loader,

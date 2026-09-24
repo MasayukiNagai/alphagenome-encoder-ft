@@ -11,10 +11,34 @@ and leaves the weights untouched.
 from __future__ import annotations
 
 import argparse
+from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
 import torch
+
+from alphagenome_encoder_ft.config import (
+    CheckpointConfig,
+    DataConfig,
+    HeadConfig,
+    LoggingConfig,
+    OptimConfig,
+    RuntimeConfig,
+    Stage2Config,
+    StageConfig,
+)
+
+# Sections of the current TrainConfig and the dataclass each is built from.
+_SECTIONS = {
+    "data": DataConfig,
+    "head": HeadConfig,
+    "optim": OptimConfig,
+    "stage1": StageConfig,
+    "stage2": Stage2Config,
+    "checkpoint": CheckpointConfig,
+    "logging": LoggingConfig,
+    "runtime": RuntimeConfig,
+}
 
 # What each v0 mode actually concatenated, in order.
 _MODE_PIECES = {
@@ -86,17 +110,28 @@ def convert_payload(checkpoint: dict[str, Any], *, construct_mode: str | None = 
     ):
         data_config.pop(key, None)
 
-    # TrainConfig.from_dict rejects sections it does not know, and pipeline-specific ones
-    # (cell_type, origin, source_ckpt, ...) are common in v0 payloads. Keep them under an
-    # underscore key, which from_dict ignores, so provenance survives without breaking the
-    # schema.
-    known = {"data", "head", "optim", "stage", "checkpoint", "logging", "runtime"}
-    kept = {key: value for key, value in config.items() if key in known or str(key).startswith("_")}
-    extra = {key: value for key, value in config.items() if key not in known and not str(key).startswith("_")}
+    # TrainConfig.from_dict rejects sections and keys it does not know. v0 payloads carry
+    # pipeline-specific sections (cell_type, origin, source_ckpt, ...) and the old flat
+    # `stage` layout. Keep whatever the current schema does not accept under an underscore
+    # key, which from_dict ignores, so provenance survives without breaking the schema.
+    config = {**config, "data": data_config}
+    kept: dict[str, Any] = {}
+    extra: dict[str, Any] = {}
+    for key, value in config.items():
+        if str(key).startswith("_"):
+            kept[key] = value
+        elif key in _SECTIONS and isinstance(value, dict):
+            accepted = {f.name for f in fields(_SECTIONS[key])}
+            kept[key] = {k: v for k, v in value.items() if k in accepted}
+            rest = {k: v for k, v in value.items() if k not in accepted}
+            if rest:
+                extra[key] = rest
+        else:
+            extra[key] = value
     if extra:
         kept["_v0_config_sections"] = extra
 
-    converted["config"] = {**kept, "data": data_config}
+    converted["config"] = kept
     converted["converted_from"] = "v0"
     return converted
 

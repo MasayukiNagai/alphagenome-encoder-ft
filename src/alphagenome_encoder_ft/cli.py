@@ -31,8 +31,9 @@ from .data import create_dataloader
 from .metrics import regression_metrics
 from .model import AlphaGenomeEncoderModel
 from .train import (
-    create_optimizer,
     create_scheduler,
+    create_stage1_optimizer,
+    create_stage2_optimizer,
     evaluate,
     load_checkpoint,
     run_training_stage,
@@ -46,6 +47,22 @@ RUN_METADATA_FILENAME = "run.json"
 # CLI
 # ---------------------------------------------------------------------------
 
+_STAGE_FLAGS: list[tuple[str, dict[str, Any]]] = [
+    ("num_epochs", {"type": int}),
+    ("early_stopping_patience", {"type": int}),
+    ("val_evals_per_epoch", {"type": int}),
+    ("head_lr", {"type": float}),
+    ("dropout", {"type": float}),
+    ("lr_scheduler", {"type": str, "choices": ["constant", "cosine", "plateau"]}),
+    ("plateau_factor", {"type": float}),
+    ("plateau_patience", {"type": int}),
+    ("plateau_min_lr", {"type": float}),
+]
+
+# Both stage sections have the same fields, so their flags carry the section name:
+# ``--stage1_num_epochs``, ``--stage2_encoder_lr``. Other sections' flags are the bare field.
+_PREFIXED_SECTIONS = {"stage1", "stage2"}
+
 _SECTION_FLAGS: dict[str, list[tuple[str, dict[str, Any]]]] = {
     "data": [
         ("batch_size", {"type": int}),
@@ -57,12 +74,12 @@ _SECTION_FLAGS: dict[str, list[tuple[str, dict[str, Any]]]] = {
         ("reverse_complement", {"action": argparse.BooleanOptionalAction}),
         ("random_shift", {"action": argparse.BooleanOptionalAction}),
         ("pin_memory", {"action": argparse.BooleanOptionalAction}),
+        ("drop_last", {"action": argparse.BooleanOptionalAction}),
     ],
     "head": [
         ("pooling_type", {"type": str, "choices": ["flatten", "center", "mean", "sum", "max"]}),
         ("center_bp", {"type": int}),
         ("hidden_sizes", {"type": str}),
-        ("dropout", {"type": float}),
         ("activation", {"type": str, "choices": ["relu", "gelu"]}),
         ("head_type", {"type": str, "choices": ["mpra", "deepstarr"]}),
         ("num_outputs", {"type": int}),
@@ -70,26 +87,12 @@ _SECTION_FLAGS: dict[str, list[tuple[str, dict[str, Any]]]] = {
     ],
     "optim": [
         ("optimizer", {"type": str, "choices": ["adam", "adamw"]}),
-        ("learning_rate", {"type": float}),
         ("weight_decay", {"type": float}),
-        ("lr_scheduler", {"type": str, "choices": ["constant", "cosine", "plateau"]}),
-        ("plateau_factor", {"type": float}),
-        ("plateau_patience", {"type": int}),
-        ("plateau_mode", {"type": str, "choices": ["min"]}),
-        ("plateau_min_lr", {"type": float}),
         ("gradient_accumulation_steps", {"type": int}),
         ("gradient_clip", {"type": float}),
     ],
-    "stage": [
-        ("num_epochs", {"type": int}),
-        ("early_stopping_patience", {"type": int}),
-        ("val_evals_per_epoch", {"type": int}),
-        ("second_stage_lr", {"type": float}),
-        ("second_stage_epochs", {"type": int}),
-        ("second_stage_dropout", {"type": float}),
-        ("second_stage_lr_scheduler", {"type": str, "choices": ["constant", "cosine", "plateau"]}),
-        ("resume_from_stage2", {"action": argparse.BooleanOptionalAction}),
-    ],
+    "stage1": _STAGE_FLAGS,
+    "stage2": [*_STAGE_FLAGS, ("encoder_lr", {"type": float})],
     "checkpoint": [
         ("pretrained_weights", {"type": str}),
         ("checkpoint_dir", {"type": str}),
@@ -112,11 +115,20 @@ def add_train_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
     """Add ``--config`` plus one override flag per ``TrainConfig`` field."""
 
     parser.add_argument("--config", type=str, default=None, help="JSON TrainConfig; flags override it")
-    for flags in _SECTION_FLAGS.values():
+    for section, flags in _SECTION_FLAGS.items():
         for name, kwargs in flags:
-            parser.add_argument(f"--{name}", default=None, **kwargs)
+            parser.add_argument(f"--{_flag_name(section, name)}", default=None, **kwargs)
+    parser.add_argument(
+        "--resume_from_stage2",
+        action="store_true",
+        help="skip stage 1 and restart stage 2 from <checkpoint_dir>/stage1/best.pt",
+    )
     parser.add_argument("--show_progress", action=argparse.BooleanOptionalAction, default=False)
     return parser
+
+
+def _flag_name(section: str, name: str) -> str:
+    return f"{section}_{name}" if section in _PREFIXED_SECTIONS else name
 
 
 def add_construct_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -137,7 +149,7 @@ def add_construct_arguments(parser: argparse.ArgumentParser) -> argparse.Argumen
 def build_overrides(args: argparse.Namespace) -> dict[str, Any]:
     overrides: dict[str, Any] = {}
     for section, flags in _SECTION_FLAGS.items():
-        values = {name: getattr(args, name, None) for name, _ in flags}
+        values = {name: getattr(args, _flag_name(section, name), None) for name, _ in flags}
         if section == "head" and values.get("hidden_sizes") is not None:
             values["hidden_sizes"] = parse_hidden_sizes(values["hidden_sizes"])
         overrides[section] = {name: value for name, value in values.items() if value is not None}
@@ -198,13 +210,18 @@ def train(
     make_dataset: Callable[[str], Dataset],
     metadata: dict[str, Any] | None = None,
     show_progress: bool = False,
+    resume_from_stage2: bool = False,
 ) -> dict[str, Any]:
-    """Two-stage (or single-stage) fine-tune driven by ``config``.
+    """Two-stage fine-tune driven by ``config``, or stage 1 only when ``config.stage2`` is None.
 
     ``make_dataset(split)`` returns the dataset for ``"train"``, ``"val"`` or ``"test"``,
     already carrying ``construct`` and the augmentation flags. ``metadata`` is recorded
     alongside the construct in ``run.json`` so evaluation can find the data again.
+    ``resume_from_stage2`` skips stage 1 and restarts stage 2 from ``stage1/best.pt``.
     """
+
+    if resume_from_stage2 and config.stage2 is None:
+        raise ValueError("resume_from_stage2 needs a stage2 section")
 
     torch.manual_seed(config.runtime.seed)
     device = _resolve_device(config)
@@ -265,54 +282,40 @@ def train(
         "num_workers": config.data.num_workers,
         "pin_memory": config.data.pin_memory,
     }
-    train_loader = create_dataloader(train_dataset, shuffle=True, **loader_kwargs)
+    train_loader = create_dataloader(
+        train_dataset, shuffle=True, drop_last=config.data.drop_last, **loader_kwargs
+    )
+    if len(train_loader) == 0:
+        raise ValueError(
+            f"drop_last leaves no training batch: {len(train_dataset)} rows < batch_size "
+            f"{config.data.batch_size}"
+        )
     val_loader = create_dataloader(val_dataset, shuffle=False, **loader_kwargs)
     test_loader = create_dataloader(test_dataset, shuffle=False, **loader_kwargs)
     print(f"  Train batches : {len(train_loader):,}")
     print(f"  Val batches   : {len(val_loader):,}")
     print(f"  Test batches  : {len(test_loader):,}")
 
-    stage1_optimizer = create_optimizer(config.optim, model.trainable_parameters(include_encoder=False))
-    stage1_scheduler = create_scheduler(config.optim, stage1_optimizer, config.stage.num_epochs)
-    stage1_scheduler_step = scheduler_stepper(config.optim.lr_scheduler)
+    stage1_optimizer = create_stage1_optimizer(config, model)
+    stage1_scheduler = create_scheduler(config.stage1, stage1_optimizer)
+    stage1_scheduler_step = scheduler_stepper(config.stage1.lr_scheduler)
 
     epoch_logger = _wandb_logger(config)
 
-    if config.stage.second_stage_lr is not None:
-
-        def stage2_optimizer_factory(model_obj):
-            return create_optimizer(
-                config.optim,
-                model_obj.trainable_parameters(include_encoder=True),
-                learning_rate=config.stage.second_stage_lr,
-            )
-
-        # Only supply a stage-2 scheduler factory when no explicit stage-2 scheduler is
-        # configured; otherwise run_two_stage_training builds it from
-        # second_stage_lr_scheduler.
-        stage2_scheduler_factory = None
-        stage2_scheduler_step = None
-        if config.stage.second_stage_lr_scheduler is None:
-
-            def stage2_scheduler_factory(optimizer):  # noqa: F811
-                return create_scheduler(config.optim, optimizer, config.stage.second_stage_epochs)
-
-            stage2_scheduler_step = scheduler_stepper(config.optim.lr_scheduler)
-
+    if config.stage2 is not None:
         results = run_two_stage_training(
             model,
             train_loader,
             stage1_optimizer=stage1_optimizer,
-            stage2_optimizer_factory=stage2_optimizer_factory,
+            stage2_optimizer_factory=lambda model_obj: create_stage2_optimizer(config, model_obj),
             config=config,
             device=device,
             val_loader=val_loader,
             stage1_scheduler=stage1_scheduler,
-            stage2_scheduler_factory=stage2_scheduler_factory,
             stage1_scheduler_step=stage1_scheduler_step,
-            stage2_scheduler_step=stage2_scheduler_step,
             epoch_callback=epoch_logger,
             show_progress=show_progress,
+            resume_from_stage2=resume_from_stage2,
         )
     else:
         results = run_training_stage(
@@ -320,8 +323,8 @@ def train(
             train_loader,
             optimizer=stage1_optimizer,
             config=config,
+            stage_config=config.stage1,
             device=device,
-            num_epochs=config.stage.num_epochs,
             stage="stage1",
             train_encoder=False,
             val_loader=val_loader,

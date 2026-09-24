@@ -40,7 +40,7 @@ device = "cuda"
 
 model = AlphaGenomeEncoderModel.from_pretrained(
     "alphagenome.safetensors",
-    HeadConfig(pooling_type="flatten", hidden_sizes=[1024], dropout=0.1, num_outputs=1),
+    HeadConfig(pooling_type="flatten", hidden_sizes=[1024], num_outputs=1),
     device=device,
     construct=construct,
 )
@@ -48,6 +48,8 @@ model.initialize_head(construct.length, device)   # materializes the lazily-shap
 ```
 
 `initialize_head` runs one dummy forward at the given input length and records that length on the model. It must run before training or before loading head weights.
+
+`HeadConfig` is the head architecture only. Dropout is a training setting: each training stage sets `model.head.dropout` from its own config section.
 
 ### Train and evaluate
 
@@ -63,6 +65,18 @@ python scripts/evaluate_lentimpra.py --checkpoint_path results/mpra_K562/stage2/
 ```
 
 `scripts/run_train_lentimpra.sh CELLTYPE` and `scripts/run_evaluate_lentimpra.sh RUN_DIR` wrap those two with the shared paths; both forward extra flags to the Python script. Config files hold training hyperparameters only, and every field has a matching command-line flag that overrides it.
+
+Training runs in two stages. Stage 1 trains the head with the encoder frozen, and stage 2 unfreezes the encoder and continues from the best stage-1 checkpoint. Each stage has its own complete section, and neither inherits from the other:
+
+```json
+"optim":  {"optimizer": "adamw", "weight_decay": 1e-06, "gradient_accumulation_steps": 1, "gradient_clip": null},
+"stage1": {"num_epochs": 100, "early_stopping_patience": 5, "val_evals_per_epoch": 4,
+           "head_lr": 1e-03, "dropout": 0.1, "lr_scheduler": "constant", ...},
+"stage2": {"num_epochs": 50, "early_stopping_patience": 5, "val_evals_per_epoch": 4,
+           "head_lr": 1e-05, "encoder_lr": 1e-05, "dropout": 0.1, "lr_scheduler": "constant", ...}
+```
+
+`optim` holds what the stages share. `"stage2": null` trains stage 1 only. Stage-section flags carry the section name (`--stage1_num_epochs`, `--stage2_encoder_lr`); the others are the bare field name (`--batch_size`). `--resume_from_stage2` skips stage 1 and restarts stage 2 from `stage1/best.pt`, which recovers a run that hit a wall-clock limit. `early_stopping_patience` counts epochs, evaluated `val_evals_per_epoch` times each. `data.drop_last` drops the last incomplete training batch; validation and test always keep every row.
 
 A run directory:
 

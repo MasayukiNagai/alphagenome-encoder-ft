@@ -7,7 +7,7 @@ import torch
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, TensorDataset
 
-from alphagenome_encoder_ft.config import OptimConfig, TrainConfig
+from alphagenome_encoder_ft.config import StageConfig, TrainConfig
 from alphagenome_encoder_ft.constructs import Construct
 from alphagenome_encoder_ft.heads import DeepSTARRHead, MPRAHead
 from alphagenome_encoder_ft.model import AlphaGenomeEncoderModel
@@ -31,26 +31,29 @@ def _make_config(tmp_path: Path) -> TrainConfig:
                 "pooling_type": "flatten",
                 "hidden_sizes": [8],
                 "center_bp": 256,
-                "dropout": 0.1,
                 "activation": "relu",
             },
             "optim": {
                 "optimizer": "adam",
-                "learning_rate": 1e-2,
                 "weight_decay": 0.0,
-                "lr_scheduler": "constant",
-                "plateau_factor": 0.5,
-                "plateau_patience": 2,
-                "plateau_mode": "min",
-                "plateau_min_lr": 0.0,
                 "gradient_accumulation_steps": 1,
             },
-            "stage": {
+            "stage1": {
                 "num_epochs": 2,
                 "early_stopping_patience": 5,
                 "val_evals_per_epoch": 1,
-                "second_stage_lr": 1e-3,
-                "second_stage_epochs": 1,
+                "head_lr": 1e-2,
+                "dropout": 0.1,
+                "lr_scheduler": "constant",
+            },
+            "stage2": {
+                "num_epochs": 1,
+                "early_stopping_patience": 5,
+                "val_evals_per_epoch": 1,
+                "head_lr": 1e-3,
+                "encoder_lr": 1e-3,
+                "dropout": 0.1,
+                "lr_scheduler": "constant",
             },
             "checkpoint": {
                 "pretrained_weights": "/tmp/weights.pt",
@@ -86,8 +89,8 @@ def test_run_training_stage_writes_minimal_checkpoint(tmp_path: Path):
         loader,
         optimizer=optimizer,
         config=config,
+        stage_config=config.stage1,
         device="cpu",
-        num_epochs=2,
         stage="stage1",
         train_encoder=False,
         checkpoint_dir=tmp_path / "stage1",
@@ -133,8 +136,8 @@ def test_resume_from_stage2_loads_stage1_checkpoint(tmp_path: Path):
         loader,
         optimizer=optimizer,
         config=config,
+        stage_config=config.stage1,
         device="cpu",
-        num_epochs=1,
         stage="stage1",
         train_encoder=False,
         checkpoint_dir=tmp_path / "stage1",
@@ -142,7 +145,6 @@ def test_resume_from_stage2_loads_stage1_checkpoint(tmp_path: Path):
 
     stage2_model = _make_model()
     stage2_config = _make_config(tmp_path)
-    stage2_config.stage.resume_from_stage2 = True
     result = run_two_stage_training(
         stage2_model,
         loader,
@@ -153,27 +155,36 @@ def test_resume_from_stage2_loads_stage1_checkpoint(tmp_path: Path):
         ),
         config=stage2_config,
         device="cpu",
+        resume_from_stage2=True,
     )
 
     assert result["stage2"]["best_checkpoint_path"] is not None
 
 
-def test_two_stage_training_applies_second_stage_dropout_and_scheduler(tmp_path: Path, monkeypatch):
+def test_two_stage_training_applies_each_stages_dropout_and_scheduler(tmp_path: Path, monkeypatch):
     model = _make_model()
     loader = _make_loader()
     config = _make_config(tmp_path)
-    config.stage.second_stage_dropout = 0.25
-    config.stage.second_stage_lr_scheduler = "plateau"
+    config.stage1.dropout = 0.05
+    config.stage2.dropout = 0.25
+    config.stage2.lr_scheduler = "plateau"
 
     built = []
+    dropout_seen = []
     real_create_scheduler = train_module.create_scheduler
+    real_train_epoch = train_module.train_epoch
 
-    def spy_create_scheduler(optim_config, optimizer, total_epochs):
-        scheduler = real_create_scheduler(optim_config, optimizer, total_epochs)
-        built.append((optim_config, scheduler))
+    def spy_create_scheduler(stage_config, optimizer):
+        scheduler = real_create_scheduler(stage_config, optimizer)
+        built.append((stage_config, scheduler))
         return scheduler
 
+    def spy_train_epoch(model_obj, *args, **kwargs):
+        dropout_seen.append(model_obj.head.dropout)
+        return real_train_epoch(model_obj, *args, **kwargs)
+
     monkeypatch.setattr(train_module, "create_scheduler", spy_create_scheduler)
+    monkeypatch.setattr(train_module, "train_epoch", spy_train_epoch)
 
     run_two_stage_training(
         model,
@@ -187,42 +198,38 @@ def test_two_stage_training_applies_second_stage_dropout_and_scheduler(tmp_path:
         device="cpu",
     )
 
-    # The head dropout is raised for the encoder-unfrozen stage, and the stage-2
-    # scheduler is built from second_stage_lr_scheduler at the second-stage lr.
-    assert model.head.dropout == 0.25
+    # stage 1 runs at its own dropout for its 2 epochs, stage 2 at its own for 1 epoch, and
+    # the stage-2 scheduler is built from the stage2 section.
+    assert dropout_seen == [0.05, 0.05, 0.25]
     assert len(built) == 1
-    stage2_optim_config, stage2_scheduler = built[0]
-    assert stage2_optim_config.lr_scheduler == "plateau"
-    assert stage2_optim_config.learning_rate == config.stage.second_stage_lr
+    stage2_config, stage2_scheduler = built[0]
+    assert stage2_config is config.stage2
     assert isinstance(stage2_scheduler, ReduceLROnPlateau)
 
 
-def test_stage_config_rejects_invalid_second_stage_dropout():
-    try:
-        TrainConfig.from_dict(
-            {
-                "checkpoint": {"pretrained_weights": "/tmp/weights.pt"},
-                "stage": {"second_stage_dropout": 1.0},
-            }
-        )
-    except ValueError as exc:
-        assert "stage.second_stage_dropout" in str(exc)
-    else:
-        raise AssertionError("Expected ValueError for invalid second_stage_dropout")
+def test_stage_sections_name_themselves_in_errors():
+    with pytest.raises(ValueError, match="stage2.dropout"):
+        TrainConfig.from_dict({"stage2": {"dropout": 1.0}})
+    with pytest.raises(ValueError, match="stage1.lr_scheduler"):
+        TrainConfig.from_dict({"stage1": {"lr_scheduler": "linear"}})
+    with pytest.raises(ValueError, match="stage2.encoder_lr"):
+        TrainConfig.from_dict({"stage2": {"encoder_lr": 0.0}})
 
 
-def test_stage_config_rejects_unknown_second_stage_lr_scheduler():
-    try:
-        TrainConfig.from_dict(
-            {
-                "checkpoint": {"pretrained_weights": "/tmp/weights.pt"},
-                "stage": {"second_stage_lr_scheduler": "linear"},
-            }
-        )
-    except ValueError as exc:
-        assert "stage.second_stage_lr_scheduler" in str(exc)
-    else:
-        raise AssertionError("Expected ValueError for unknown second_stage_lr_scheduler")
+def test_stage2_null_means_a_single_stage():
+    assert TrainConfig().stage2 is None
+    assert TrainConfig.from_dict({"stage2": None}).stage2 is None
+    assert TrainConfig.from_dict({"stage2": {}}).stage2 is not None
+
+
+def test_old_flat_stage_layout_is_rejected_with_a_migration_map():
+    with pytest.raises(ValueError, match="split into 'stage1' and 'stage2'"):
+        TrainConfig.from_dict({"stage": {"second_stage_lr": 1e-5}})
+
+
+def test_unknown_keys_in_a_section_are_rejected():
+    with pytest.raises(ValueError, match="Unknown keys in 'optim': learning_rate"):
+        TrainConfig.from_dict({"optim": {"learning_rate": 1e-3}})
 
 
 def test_run_training_stage_runs_validation_within_each_epoch_and_emits_callbacks(tmp_path: Path):
@@ -230,8 +237,8 @@ def test_run_training_stage_runs_validation_within_each_epoch_and_emits_callback
     train_loader = _make_loader()
     val_loader = _make_loader()
     config = _make_config(tmp_path)
-    config.stage.num_epochs = 3
-    config.stage.val_evals_per_epoch = 2
+    config.stage1.num_epochs = 3
+    config.stage1.val_evals_per_epoch = 2
     optimizer = torch.optim.Adam(model.head.parameters(), lr=1e-2)
     epoch_events = []
 
@@ -240,8 +247,8 @@ def test_run_training_stage_runs_validation_within_each_epoch_and_emits_callback
         train_loader,
         optimizer=optimizer,
         config=config,
+        stage_config=config.stage1,
         device="cpu",
-        num_epochs=3,
         stage="stage1",
         train_encoder=False,
         val_loader=val_loader,
@@ -263,8 +270,8 @@ def test_run_training_stage_validates_once_per_epoch_when_requested(tmp_path: Pa
     train_loader = _make_loader()
     val_loader = _make_loader()
     config = _make_config(tmp_path)
-    config.stage.num_epochs = 2
-    config.stage.val_evals_per_epoch = 1
+    config.stage1.num_epochs = 2
+    config.stage1.val_evals_per_epoch = 1
     optimizer = torch.optim.Adam(model.head.parameters(), lr=1e-2)
 
     result = run_training_stage(
@@ -272,8 +279,8 @@ def test_run_training_stage_validates_once_per_epoch_when_requested(tmp_path: Pa
         train_loader,
         optimizer=optimizer,
         config=config,
+        stage_config=config.stage1,
         device="cpu",
-        num_epochs=2,
         stage="stage1",
         train_encoder=False,
         val_loader=val_loader,
@@ -288,8 +295,8 @@ def test_run_training_stage_deduplicates_dense_validation_points(tmp_path: Path)
     train_loader = _make_loader()
     val_loader = _make_loader()
     config = _make_config(tmp_path)
-    config.stage.num_epochs = 1
-    config.stage.val_evals_per_epoch = 5
+    config.stage1.num_epochs = 1
+    config.stage1.val_evals_per_epoch = 5
     optimizer = torch.optim.Adam(model.head.parameters(), lr=1e-2)
 
     result = run_training_stage(
@@ -297,8 +304,8 @@ def test_run_training_stage_deduplicates_dense_validation_points(tmp_path: Path)
         train_loader,
         optimizer=optimizer,
         config=config,
+        stage_config=config.stage1,
         device="cpu",
-        num_epochs=1,
         stage="stage1",
         train_encoder=False,
         val_loader=val_loader,
@@ -313,9 +320,9 @@ def test_run_training_stage_early_stopping_counts_validation_events(tmp_path: Pa
     train_loader = _make_loader()
     val_loader = _make_loader()
     config = _make_config(tmp_path)
-    config.stage.num_epochs = 10
-    config.stage.early_stopping_patience = 2
-    config.stage.val_evals_per_epoch = 3
+    config.stage1.num_epochs = 10
+    config.stage1.early_stopping_patience = 2
+    config.stage1.val_evals_per_epoch = 3
     optimizer = torch.optim.Adam(model.head.parameters(), lr=1e-2)
 
     original_evaluate = train_module.evaluate
@@ -331,8 +338,8 @@ def test_run_training_stage_early_stopping_counts_validation_events(tmp_path: Pa
             train_loader,
             optimizer=optimizer,
             config=config,
+            stage_config=config.stage1,
             device="cpu",
-            num_epochs=10,
             stage="stage1",
             train_encoder=False,
             val_loader=val_loader,
@@ -357,8 +364,8 @@ def test_load_checkpoint_then_evaluate_best_checkpoint(tmp_path: Path):
         train_loader,
         optimizer=optimizer,
         config=config,
+        stage_config=config.stage1,
         device="cpu",
-        num_epochs=2,
         stage="stage1",
         train_encoder=False,
         checkpoint_dir=tmp_path / "stage1",
@@ -372,36 +379,26 @@ def test_load_checkpoint_then_evaluate_best_checkpoint(tmp_path: Path):
 
 
 def test_create_scheduler_uses_plateau_config():
-    optimizer = torch.optim.Adam([torch.nn.Parameter(torch.tensor(1.0))], lr=1e-2)
-    optim_config = OptimConfig(
+    optimizer = torch.optim.Adam([torch.nn.Parameter(torch.tensor(1.0))], lr=1e-3)
+    stage_config = StageConfig(
+        num_epochs=5,
         lr_scheduler="plateau",
         plateau_factor=0.25,
         plateau_patience=4,
-        plateau_mode="min",
         plateau_min_lr=1e-5,
     )
 
-    scheduler = create_scheduler(optim_config, optimizer, total_epochs=5)
+    scheduler = create_scheduler(stage_config, optimizer)
 
     assert isinstance(scheduler, ReduceLROnPlateau)
     assert scheduler.factor == 0.25
     assert scheduler.patience == 4
-    assert scheduler.mode == "min"
     assert scheduler.min_lrs == [1e-5]
 
 
 def test_train_config_rejects_invalid_plateau_settings():
-    try:
-        TrainConfig.from_dict(
-            {
-                "checkpoint": {"pretrained_weights": "/tmp/weights.pt"},
-                "optim": {"plateau_factor": 1.0},
-            }
-        )
-    except ValueError as exc:
-        assert "optim.plateau_factor" in str(exc)
-    else:
-        raise AssertionError("Expected ValueError for invalid plateau_factor")
+    with pytest.raises(ValueError, match="stage1.plateau_factor"):
+        TrainConfig.from_dict({"stage1": {"plateau_factor": 1.0}})
 
 
 def test_save_checkpoint_persists_head_type_mpra_default(tmp_path: Path):
@@ -465,7 +462,6 @@ def test_save_checkpoint_persists_head_type_deepstarr(tmp_path: Path):
                 "pooling_type": "flatten",
                 "hidden_sizes": [8],
                 "center_bp": 256,
-                "dropout": 0.5,
                 "activation": "relu",
                 "num_outputs": 2,
             },
@@ -474,7 +470,7 @@ def test_save_checkpoint_persists_head_type_deepstarr(tmp_path: Path):
                 "checkpoint_dir": str(tmp_path),
                 "save_mode": "minimal",
             },
-            "stage": {"second_stage_lr": 1e-3},
+            "stage2": {"encoder_lr": 1e-3},
         }
     )
     model = AlphaGenomeEncoderModel(DummyAlphaGenome(), DeepSTARRHead(pooling_type="flatten", hidden_sizes=8))
@@ -535,8 +531,8 @@ def test_training_runs_with_show_progress_and_no_tqdm(tmp_path: Path, monkeypatc
         _make_loader(),
         optimizer=torch.optim.Adam(model.head.parameters(), lr=1e-2),
         config=config,
+        stage_config=config.stage1,
         device="cpu",
-        num_epochs=1,
         stage="stage1",
         train_encoder=False,
         checkpoint_dir=tmp_path / "stage1",
@@ -544,3 +540,98 @@ def test_training_runs_with_show_progress_and_no_tqdm(tmp_path: Path, monkeypatc
     )
 
     assert result["best_checkpoint_path"] is not None
+
+
+# -------------------------
+# Stage-2 learning rates and drop_last
+# -------------------------
+
+
+def test_stage2_optimizer_uses_separate_encoder_and_head_rates(tmp_path: Path):
+    model = _make_model()
+    config = _make_config(tmp_path)
+    config.stage2.encoder_lr = 1e-4
+    config.stage2.head_lr = 1e-3
+    model.set_encoder_trainable(True)
+
+    optimizer = train_module.create_stage2_optimizer(config, model)
+
+    encoder_ids = {id(p) for p in model.encoder.parameters()}
+    head_ids = {id(p) for p in model.head.parameters()}
+    assert [group["lr"] for group in optimizer.param_groups] == [1e-4, 1e-3]
+    assert {id(p) for p in optimizer.param_groups[0]["params"]} == encoder_ids
+    assert {id(p) for p in optimizer.param_groups[1]["params"]} == head_ids
+
+
+def test_stage1_optimizer_trains_the_head_alone_at_stage1_head_lr(tmp_path: Path):
+    model = _make_model()
+    config = _make_config(tmp_path)
+    model.set_encoder_trainable(False)
+
+    optimizer = train_module.create_stage1_optimizer(config, model)
+
+    assert [group["lr"] for group in optimizer.param_groups] == [config.stage1.head_lr]
+    assert {id(p) for p in optimizer.param_groups[0]["params"]} == {id(p) for p in model.head.parameters()}
+
+
+def test_encoder_head_param_groups_drops_a_frozen_encoder():
+    model = _make_model()
+    model.set_encoder_trainable(False)
+
+    groups = train_module.encoder_head_param_groups(model, encoder_lr=1e-4, head_lr=1e-3)
+
+    assert len(groups) == 1
+    assert groups[0]["lr"] == 1e-3
+
+
+def test_two_stage_training_steps_encoder_and_head_at_their_own_rates(tmp_path: Path):
+    model = _make_model()
+    config = _make_config(tmp_path)
+    config.stage2.encoder_lr = 1e-4
+    config.stage2.head_lr = 1e-3
+
+    built = []
+
+    def factory(model_obj):
+        optimizer = train_module.create_stage2_optimizer(config, model_obj)
+        built.append(optimizer)
+        return optimizer
+
+    run_two_stage_training(
+        model,
+        _make_loader(),
+        stage1_optimizer=torch.optim.Adam(model.head.parameters(), lr=1e-2),
+        stage2_optimizer_factory=factory,
+        config=config,
+        device="cpu",
+    )
+
+    assert [group["lr"] for group in built[0].param_groups] == [1e-4, 1e-3]
+
+
+def test_cli_flags_are_prefixed_by_stage_and_reach_the_config():
+    import argparse
+
+    from alphagenome_encoder_ft.cli import add_train_arguments, build_overrides
+
+    parser = add_train_arguments(argparse.ArgumentParser())
+    args = parser.parse_args(
+        [
+            "--drop_last",
+            "--stage1_head_lr", "1e-2",
+            "--stage2_encoder_lr", "1e-4",
+            "--stage2_head_lr", "1e-3",
+            "--stage2_early_stopping_patience", "7",
+            "--resume_from_stage2",
+        ]
+    )
+    config = TrainConfig.from_dict(build_overrides(args))
+
+    assert config.data.drop_last is True
+    assert config.stage1.head_lr == 1e-2
+    assert config.stage2.encoder_lr == 1e-4
+    assert config.stage2.head_lr == 1e-3
+    assert config.stage2.early_stopping_patience == 7
+    assert config.stage1.early_stopping_patience == StageConfig().early_stopping_patience
+    assert args.resume_from_stage2 is True
+    assert TrainConfig().data.drop_last is False
