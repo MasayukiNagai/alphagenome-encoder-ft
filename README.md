@@ -76,7 +76,7 @@ Training runs in two stages. Stage 1 trains the head with the encoder frozen, an
            "head_lr": 1e-05, "encoder_lr": 1e-05, "dropout": 0.1, "lr_scheduler": "constant", ...}
 ```
 
-`optim` holds what the stages share. `"stage2": null` trains stage 1 only. Stage-section flags carry the section name (`--stage1_num_epochs`, `--stage2_encoder_lr`); the others are the bare field name (`--batch_size`). `--resume_from_stage2` skips stage 1 and restarts stage 2 from `stage1/best.pt`, which recovers a run that hit a wall-clock limit. `early_stopping_patience` counts epochs, evaluated `val_evals_per_epoch` times each. `data.drop_last` drops the last incomplete training batch; validation and test always keep every row.
+`optim` holds what the stages share. `"stage2": null` trains stage 1 only. Training never touches the test split unless `--evaluate_test` is passed: checkpoints are selected on validation, and the evaluate script scores test afterwards, so a hyperparameter search cannot see test numbers. Stage-section flags carry the section name (`--stage1_num_epochs`, `--stage2_encoder_lr`); the others are the bare field name (`--batch_size`). `--resume_from_stage2` skips stage 1 and restarts stage 2 from `stage1/best.pt`, which recovers a run that hit a wall-clock limit. `early_stopping_patience` counts epochs, evaluated `val_evals_per_epoch` times each. `data.drop_last` drops the last incomplete training batch; validation and test always keep every row.
 
 A run directory:
 
