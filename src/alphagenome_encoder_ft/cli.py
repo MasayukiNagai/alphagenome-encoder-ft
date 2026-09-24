@@ -124,6 +124,11 @@ def add_train_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
         help="skip stage 1 and restart stage 2 from <checkpoint_dir>/stage1/best.pt",
     )
     parser.add_argument(
+        "--stage1_only",
+        action="store_true",
+        help="train stage 1 only, as if the config had \"stage2\": null",
+    )
+    parser.add_argument(
         "--evaluate_test",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -164,8 +169,12 @@ def build_overrides(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def load_config(parser: argparse.ArgumentParser, args: argparse.Namespace) -> TrainConfig:
+    """The config file with every flag applied. ``--stage1_only`` drops the stage2 section."""
+
     try:
         config = merge_train_config(load_train_config(args.config), build_overrides(args))
+        if getattr(args, "stage1_only", False):
+            config.stage2 = None
         config.validate()
     except ValueError as exc:
         parser.error(str(exc))
