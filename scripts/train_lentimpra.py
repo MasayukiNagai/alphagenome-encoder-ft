@@ -50,6 +50,7 @@ def main() -> dict[str, Any]:
         make_dataset=make_dataset,
         metadata={"dataset": "lentimpra", "input_tsv": str(args.input_tsv)},
         show_progress=args.show_progress,
+        resume_from_stage2=args.resume_from_stage2,
     )
 
 

@@ -112,3 +112,20 @@ def test_a_mode_missing_its_pieces_is_reported():
 
     with pytest.raises(ValueError, match="promoter_seq"):
         convert_payload(payload)
+
+
+def test_old_training_layout_is_quarantined_so_the_converted_config_loads():
+    payload = _payload(construct_mode="promoter_barcode")
+    payload["config"].update(
+        {
+            "optim": {"optimizer": "adam", "learning_rate": 1e-3, "weight_decay": 1e-6},
+            "stage": {"num_epochs": 100, "second_stage_lr": 1e-5},
+        }
+    )
+
+    config = convert_payload(payload)["config"]
+
+    TrainConfig.from_dict(config)
+    assert config["optim"] == {"optimizer": "adam", "weight_decay": 1e-6}
+    assert config["_v0_config_sections"]["optim"] == {"learning_rate": 1e-3}
+    assert config["_v0_config_sections"]["stage"] == {"num_epochs": 100, "second_stage_lr": 1e-5}

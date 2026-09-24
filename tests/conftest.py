@@ -34,7 +34,6 @@ def make_config(tmp_path: Path, *, save_mode: str = "minimal", **sections) -> Tr
             "pooling_type": "flatten",
             "hidden_sizes": [8],
             "center_bp": 256,
-            "dropout": 0.1,
             "activation": "relu",
         },
         "checkpoint": {
