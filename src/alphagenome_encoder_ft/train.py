@@ -435,6 +435,7 @@ def run_training_stage(
     best_monitor = math.inf
     best_epoch: float = float(start_epoch)
     best_checkpoint_path: Path | None = None
+    best_val_metrics: dict[str, float] | None = None
     evals_without_improvement = 0
 
     for epoch_idx in range(num_epochs):
@@ -453,7 +454,7 @@ def run_training_stage(
         should_stop = False
 
         def _validate_if_needed(batch_idx: int, total_batches: int) -> bool:
-            nonlocal best_checkpoint_path, best_epoch, best_monitor
+            nonlocal best_checkpoint_path, best_epoch, best_monitor, best_val_metrics
             nonlocal evals_without_improvement, latest_eval_metrics, should_stop, val_metrics
 
             if val_loader is None or batch_idx not in val_eval_points:
@@ -483,6 +484,7 @@ def run_training_stage(
             if val_metrics["loss"] < best_monitor:
                 best_monitor = val_metrics["loss"]
                 best_epoch = float(current_epoch)
+                best_val_metrics = dict(val_metrics)
                 evals_without_improvement = 0
                 if stage_dir is not None:
                     best_checkpoint_path = save_checkpoint(
@@ -565,6 +567,8 @@ def run_training_stage(
         "history": history,
         "best_epoch": best_epoch,
         "best_monitor": best_monitor,
+        # The validation metrics of the evaluation that selected best.pt; None without validation.
+        "best_val_metrics": best_val_metrics,
         "best_checkpoint_path": str(best_checkpoint_path) if best_checkpoint_path is not None else None,
     }
 
@@ -640,6 +644,7 @@ def run_two_stage_training(
             "history": _history_template(),
             "best_epoch": 0,
             "best_monitor": math.inf,
+            "best_val_metrics": None,
             "best_checkpoint_path": str(stage1_checkpoint),
         }
 

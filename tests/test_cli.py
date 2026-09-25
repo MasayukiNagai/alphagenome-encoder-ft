@@ -93,3 +93,33 @@ def test_stage1_only_trains_no_stage2(tmp_path: Path, dummy_backbone):
     assert "stage2" not in results
     assert (tmp_path / "stage1" / "best.pt").exists() and not (tmp_path / "stage2").exists()
     assert json.loads((tmp_path / "config.json").read_text())["stage2"] is None
+
+
+def test_train_reports_each_stages_best_validation_to_wandb(tmp_path: Path, dummy_backbone, monkeypatch):
+    import sys
+    import types
+
+    summary: dict = {}
+    init_kwargs: dict = {}
+    fake = types.SimpleNamespace(
+        init=lambda **kwargs: init_kwargs.update(kwargs),
+        log=lambda payload: None,
+        finish=lambda: None,
+        run=types.SimpleNamespace(summary=summary),
+    )
+    monkeypatch.setitem(sys.modules, "wandb", fake)
+    config = _two_stage_config(tmp_path)
+    config.logging.use_wandb = True
+    config.stage1.val_evals_per_epoch = 2
+
+    results = cli.train(config, construct=None, make_dataset=_datasets([]))
+
+    history = json.loads((tmp_path / "history.json").read_text())
+    stage1_evals = len(results["stage1"]["history"]["val_loss"])
+    stage1_losses = history["val_loss"][:stage1_evals]
+    i = min(range(stage1_evals), key=stage1_losses.__getitem__)
+    assert summary["stage1/best_val_loss"] == stage1_losses[i]
+    assert summary["stage1/best_val_pearson"] == history["val_pearson"][i]
+    assert summary["stage1/best_epoch"] == history["val_epoch"][i]
+    assert summary["stage2/best_val_loss"] == min(history["val_loss"][stage1_evals:])
+    assert init_kwargs["config"]["head_hidden_sizes"] == "8"
