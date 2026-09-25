@@ -635,3 +635,29 @@ def test_cli_flags_are_prefixed_by_stage_and_reach_the_config():
     assert config.stage1.early_stopping_patience == StageConfig().early_stopping_patience
     assert args.resume_from_stage2 is True
     assert TrainConfig().data.drop_last is False
+
+
+def test_run_training_stage_returns_the_metrics_of_its_best_evaluation(tmp_path: Path):
+    model = _make_model()
+    config = _make_config(tmp_path)
+    config.stage1.num_epochs = 3
+    config.stage1.val_evals_per_epoch = 2
+
+    result = run_training_stage(
+        model,
+        _make_loader(),
+        optimizer=torch.optim.Adam(model.head.parameters(), lr=1e-2),
+        config=config,
+        stage_config=config.stage1,
+        device="cpu",
+        stage="stage1",
+        train_encoder=False,
+        val_loader=_make_loader(),
+        checkpoint_dir=tmp_path / "stage1",
+    )
+
+    losses = result["history"]["val_loss"]
+    i = min(range(len(losses)), key=losses.__getitem__)
+    assert result["best_val_metrics"]["loss"] == losses[i] == result["best_monitor"]
+    assert result["best_val_metrics"]["pearson"] == result["history"]["val_pearson"][i]
+    assert result["best_epoch"] == result["history"]["val_epoch"][i]

@@ -363,6 +363,7 @@ def train(
 
     if test_loader is not None:
         _score_test(results, model, test_loader, device, config, epoch_logger)
+    _report_best(results, config)
     with open(run_dir / "history.json", "w") as handle:
         json.dump(results["history"], handle, indent=2)
 
@@ -371,6 +372,40 @@ def train(
 
         wandb.finish()
     return results
+
+
+def _stage_results(results: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """``(stage name, stage result)`` pairs from a one- or two-stage training result."""
+
+    if "stage2" in results:
+        return [("stage1", results["stage1"]), ("stage2", results["stage2"])]
+    return [("stage1", results)]
+
+
+def _report_best(results: dict[str, Any], config: TrainConfig) -> None:
+    """Print each stage's best validation metrics and write them to the wandb run summary.
+
+    These are the metrics of the evaluation that selected ``best.pt``. The logged
+    ``val_loss`` history is not a substitute: its last value is the final evaluation, not the
+    best one. Summary keys: ``<stage>/best_val_loss``, ``<stage>/best_val_pearson``,
+    ``<stage>/best_epoch``.
+    """
+
+    summary: dict[str, float] = {}
+    for stage_name, stage_result in _stage_results(results):
+        best = stage_result.get("best_val_metrics")
+        if best is None:  # no validation split, or stage 1 skipped by resume_from_stage2
+            continue
+        epoch = float(stage_result["best_epoch"])
+        pearson = best.get("pearson", float("nan"))
+        print(f"[{stage_name}] best | epoch {epoch:g} | val_loss={best['loss']:.4f} | val_pearson={pearson:.4f}")
+        summary[f"{stage_name}/best_val_loss"] = best["loss"]
+        summary[f"{stage_name}/best_val_pearson"] = pearson
+        summary[f"{stage_name}/best_epoch"] = epoch
+    if summary and config.logging.use_wandb:
+        import wandb
+
+        wandb.run.summary.update(summary)
 
 
 def _score_test(
@@ -383,13 +418,9 @@ def _score_test(
 ) -> None:
     """Score each stage's best checkpoint on test, recording it in ``results`` and wandb."""
 
-    stages: list[tuple[str, dict[str, Any]]] = [("stage1", results)]
-    if "stage2" in results:
-        stages = [("stage1", results["stage1"]), ("stage2", results["stage2"])]
-
     final_metrics: dict[str, float] | None = None
     final_epoch = 0.0
-    for stage_name, stage_result in stages:
+    for stage_name, stage_result in _stage_results(results):
         load_checkpoint(stage_result["best_checkpoint_path"], model, map_location=device)
         test_metrics = evaluate(model, test_loader, device, use_amp=config.runtime.use_amp)
         test_epoch = float(stage_result.get("best_epoch", 0))
@@ -428,7 +459,10 @@ def _wandb_logger(config: TrainConfig) -> Callable[[dict[str, Any]], None] | Non
         config.logging.use_wandb = False
         return None
 
-    wandb.init(project=config.logging.wandb_project, name=config.logging.wandb_name, config=config.to_dict())
+    # head.hidden_sizes is a list; head_hidden_sizes ("512x512") is the same value as one
+    # string, which wandb's parallel-coordinates and grouping panels can use as a category.
+    run_config = {**config.to_dict(), "head_hidden_sizes": "x".join(str(size) for size in config.head.hidden_sizes)}
+    wandb.init(project=config.logging.wandb_project, name=config.logging.wandb_name, config=run_config)
 
     def _log(metrics: dict[str, Any]) -> None:
         stage = str(metrics["stage"])
