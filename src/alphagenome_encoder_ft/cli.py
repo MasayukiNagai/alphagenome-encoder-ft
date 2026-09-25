@@ -463,6 +463,10 @@ def _wandb_logger(config: TrainConfig) -> Callable[[dict[str, Any]], None] | Non
     # string, which wandb's parallel-coordinates and grouping panels can use as a category.
     run_config = {**config.to_dict(), "head_hidden_sizes": "x".join(str(size) for size in config.head.hidden_sizes)}
     wandb.init(project=config.logging.wandb_project, name=config.logging.wandb_name, config=run_config)
+    # Rows come per validation pass and per epoch, so plot against the (fractional) epoch.
+    wandb.define_metric("epoch")
+    for stage in ("stage1", "stage2"):
+        wandb.define_metric(f"{stage}/*", step_metric="epoch")
 
     def _log(metrics: dict[str, Any]) -> None:
         stage = str(metrics["stage"])

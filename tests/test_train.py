@@ -174,8 +174,8 @@ def test_two_stage_training_applies_each_stages_dropout_and_scheduler(tmp_path: 
     real_create_scheduler = train_module.create_scheduler
     real_train_epoch = train_module.train_epoch
 
-    def spy_create_scheduler(stage_config, optimizer):
-        scheduler = real_create_scheduler(stage_config, optimizer)
+    def spy_create_scheduler(stage_config, optimizer, **kwargs):
+        scheduler = real_create_scheduler(stage_config, optimizer, **kwargs)
         built.append((stage_config, scheduler))
         return scheduler
 
@@ -259,10 +259,12 @@ def test_run_training_stage_runs_validation_within_each_epoch_and_emits_callback
     assert len(result["history"]["train_loss"]) == 3
     assert result["history"]["val_epoch"] == pytest.approx([1 / 3, 2 / 3, 4 / 3, 5 / 3, 7 / 3, 8 / 3])
     assert result["history"]["test_epoch"] == []
-    assert [event["epoch"] for event in epoch_events] == [1.0, 2.0, 3.0]
-    assert epoch_events[0]["val_loss"] >= 0.0
-    assert "test_loss" not in epoch_events[-1]
-    assert epoch_events[1]["val_loss"] >= 0.0
+    val_rows = [event for event in epoch_events if "val_loss" in event]
+    train_rows = [event for event in epoch_events if "train_loss" in event]
+    assert [row["epoch"] for row in val_rows] == pytest.approx(result["history"]["val_epoch"])
+    assert [row["epoch"] for row in train_rows] == [1.0, 2.0, 3.0]
+    assert all(row["lr_group0"] == 1e-2 for row in epoch_events)
+    assert all("test_loss" not in row for row in epoch_events)
 
 
 def test_run_training_stage_validates_once_per_epoch_when_requested(tmp_path: Path):
@@ -392,8 +394,18 @@ def test_create_scheduler_uses_plateau_config():
 
     assert isinstance(scheduler, ReduceLROnPlateau)
     assert scheduler.factor == 0.25
-    assert scheduler.patience == 4
+    # 4 epochs x 1 pass per epoch: cut on the 4th pass without improvement (torch counts "> patience").
+    assert scheduler.patience == 3
+    assert scheduler.threshold == 0.0
     assert scheduler.min_lrs == [1e-5]
+
+
+def test_create_scheduler_counts_plateau_patience_in_validation_passes():
+    optimizer = torch.optim.Adam([torch.nn.Parameter(torch.tensor(1.0))], lr=1e-3)
+    stage_config = StageConfig(lr_scheduler="plateau", plateau_patience=2, val_evals_per_epoch=4)
+
+    assert create_scheduler(stage_config, optimizer).patience == 2 * 4 - 1
+    assert create_scheduler(stage_config, optimizer, per_validation_pass=False).patience == 2 - 1
 
 
 def test_train_config_rejects_invalid_plateau_settings():
@@ -661,3 +673,50 @@ def test_run_training_stage_returns_the_metrics_of_its_best_evaluation(tmp_path:
     assert result["best_val_metrics"]["loss"] == losses[i] == result["best_monitor"]
     assert result["best_val_metrics"]["pearson"] == result["history"]["val_pearson"][i]
     assert result["best_epoch"] == result["history"]["val_epoch"][i]
+
+
+def test_plateau_cuts_the_rate_after_patience_times_evals_passes_without_improvement(tmp_path: Path, monkeypatch):
+    model = _make_model()
+    config = _make_config(tmp_path)
+    config.stage1.num_epochs = 3
+    config.stage1.val_evals_per_epoch = 3          # 3 batches per epoch -> a pass after every batch
+    config.stage1.early_stopping_patience = 10
+    config.stage1.lr_scheduler = "plateau"
+    config.stage1.plateau_patience = 1             # 1 epoch = 3 passes
+    config.stage1.plateau_factor = 0.5
+    optimizer = train_module.create_stage1_optimizer(config, model)
+    scheduler = create_scheduler(config.stage1, optimizer)
+    losses = iter([1.0] + [2.0] * 20)
+    monkeypatch.setattr(train_module, "evaluate", lambda *args, **kwargs: {"loss": next(losses), "pearson": 0.0})
+
+    result = run_training_stage(
+        model,
+        _make_loader(),
+        optimizer=optimizer,
+        config=config,
+        stage_config=config.stage1,
+        device="cpu",
+        stage="stage1",
+        train_encoder=False,
+        val_loader=_make_loader(),
+        scheduler=scheduler,
+    )
+
+    # Each entry is the rate used before that pass. Pass 1 improves; passes 2-4 do not, so the
+    # rate halves after pass 4, and again after 3 more (passes 5-7).
+    lr = config.stage1.head_lr
+    assert result["history"]["lr_head"] == pytest.approx([lr] * 4 + [lr / 2] * 3 + [lr / 4] * 2)
+
+
+def test_stage_optimizers_name_their_parameter_groups(tmp_path: Path):
+    model = _make_model()
+    config = _make_config(tmp_path)
+
+    assert [g["name"] for g in train_module.create_stage1_optimizer(config, model).param_groups] == ["head"]
+    model.set_encoder_trainable(True)
+    stage2 = train_module.create_stage2_optimizer(config, model)
+    assert [g["name"] for g in stage2.param_groups] == ["encoder", "head"]
+    assert train_module.group_learning_rates(stage2) == {
+        "lr_encoder": config.stage2.encoder_lr,
+        "lr_head": config.stage2.head_lr,
+    }

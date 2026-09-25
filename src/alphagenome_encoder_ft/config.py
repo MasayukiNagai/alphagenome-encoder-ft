@@ -125,9 +125,11 @@ class OptimConfig:
 class StageConfig:
     """One training stage, complete: nothing is inherited from the other stage.
 
-    Stage 1 trains the head with the encoder frozen. ``early_stopping_patience`` counts
-    epochs and is converted to ``patience * val_evals_per_epoch`` evaluations. The plateau
-    fields apply only when ``lr_scheduler`` is ``plateau``, which steps on validation loss.
+    Stage 1 trains the head with the encoder frozen. ``early_stopping_patience`` and
+    ``plateau_patience`` both count epochs and are checked at every validation pass:
+    training stops, or the plateau schedule multiplies the rate by ``plateau_factor``, once
+    ``patience * val_evals_per_epoch`` passes in a row have not improved on the best
+    validation loss. The plateau fields apply only when ``lr_scheduler`` is ``plateau``.
     """
 
     SECTION: ClassVar[str] = "stage1"
