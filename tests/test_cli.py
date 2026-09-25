@@ -104,6 +104,7 @@ def test_train_reports_each_stages_best_validation_to_wandb(tmp_path: Path, dumm
     fake = types.SimpleNamespace(
         init=lambda **kwargs: init_kwargs.update(kwargs),
         log=lambda payload: None,
+        define_metric=lambda *args, **kwargs: None,
         finish=lambda: None,
         run=types.SimpleNamespace(summary=summary),
     )
@@ -123,3 +124,38 @@ def test_train_reports_each_stages_best_validation_to_wandb(tmp_path: Path, dumm
     assert summary["stage1/best_epoch"] == history["val_epoch"][i]
     assert summary["stage2/best_val_loss"] == min(history["val_loss"][stage1_evals:])
     assert init_kwargs["config"]["head_hidden_sizes"] == "8"
+
+
+
+def test_train_logs_every_validation_pass_with_learning_rates(tmp_path: Path, dummy_backbone, monkeypatch):
+    import sys
+    import types
+
+    rows: list[dict] = []
+    defined: list[tuple] = []
+    fake = types.SimpleNamespace(
+        init=lambda **kwargs: None,
+        log=rows.append,
+        define_metric=lambda name, **kwargs: defined.append((name, kwargs.get("step_metric"))),
+        finish=lambda: None,
+        run=types.SimpleNamespace(summary={}),
+    )
+    monkeypatch.setitem(sys.modules, "wandb", fake)
+    config = _two_stage_config(tmp_path)
+    config.logging.use_wandb = True
+    config.stage1.val_evals_per_epoch = 2
+    config.stage2.val_evals_per_epoch = 2
+
+    results = cli.train(config, construct=None, make_dataset=_datasets([]))
+
+    history = json.loads((tmp_path / "history.json").read_text())
+    n_stage1 = len(results["stage1"]["history"]["val_epoch"])
+    val_rows = [r for r in rows if "stage1/val_loss" in r or "stage2/val_loss" in r]
+    assert len(val_rows) == len(history["val_epoch"])
+    assert all("stage1/lr_head" in r for r in val_rows[:n_stage1])
+    assert all("stage2/lr_encoder" in r and "stage2/lr_head" in r for r in val_rows[n_stage1:])
+    # history: learning rates aligned with val_epoch; no encoder rate in stage 1
+    assert len(history["lr_head"]) == len(history["lr_encoder"]) == len(history["val_epoch"])
+    assert history["lr_encoder"][:n_stage1] == [None] * n_stage1
+    assert history["lr_encoder"][n_stage1:] == [config.stage2.encoder_lr] * (len(history["val_epoch"]) - n_stage1)
+    assert ("stage1/*", "epoch") in defined and ("stage2/*", "epoch") in defined

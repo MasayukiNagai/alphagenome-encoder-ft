@@ -38,6 +38,7 @@ __all__ = [
     "create_stage2_optimizer",
     "encoder_head_param_groups",
     "create_scheduler",
+    "group_learning_rates",
     "scheduler_stepper",
 ]
 
@@ -91,6 +92,7 @@ _MODULE_BY_NAME = {
             "create_stage2_optimizer",
             "encoder_head_param_groups",
             "create_scheduler",
+            "group_learning_rates",
             "scheduler_stepper",
         ],
         "train",

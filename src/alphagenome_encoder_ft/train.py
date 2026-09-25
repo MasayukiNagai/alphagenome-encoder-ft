@@ -103,7 +103,10 @@ def encoder_head_param_groups(
     encoder = [p for p in model.encoder.parameters() if p.requires_grad]
     encoder_ids = {id(p) for p in encoder}
     head = [p for p in model.head.parameters() if p.requires_grad and id(p) not in encoder_ids]
-    groups = [{"params": encoder, "lr": encoder_lr}, {"params": head, "lr": head_lr}]
+    groups = [
+        {"params": encoder, "lr": encoder_lr, "name": "encoder"},
+        {"params": head, "lr": head_lr, "name": "head"},
+    ]
     return [group for group in groups if group["params"]]
 
 
@@ -125,10 +128,11 @@ def create_optimizer(
 
 
 def create_stage1_optimizer(config: TrainConfig, model: AlphaGenomeEncoderModel) -> torch.optim.Optimizer:
-    """Stage-1 optimizer: the head alone at ``stage1.head_lr``."""
+    """Stage-1 optimizer: the head alone at ``stage1.head_lr``, as the parameter group ``head``."""
 
+    head = [p for p in model.head.parameters() if p.requires_grad]
     return create_optimizer(
-        config.optim, model.trainable_parameters(include_encoder=False), learning_rate=config.stage1.head_lr
+        config.optim, [{"params": head, "name": "head"}], learning_rate=config.stage1.head_lr
     )
 
 
@@ -142,10 +146,21 @@ def create_stage2_optimizer(config: TrainConfig, model: AlphaGenomeEncoderModel)
     return create_optimizer(config.optim, groups, learning_rate=stage2.encoder_lr)
 
 
-def create_scheduler(stage_config: StageConfig, optimizer: torch.optim.Optimizer):
+def create_scheduler(
+    stage_config: StageConfig,
+    optimizer: torch.optim.Optimizer,
+    *,
+    per_validation_pass: bool = True,
+):
     """The stage's ``lr_scheduler`` over ``optimizer``; ``None`` for a constant rate.
 
-    Cosine anneals over ``num_epochs``. Plateau steps on validation loss.
+    Cosine anneals over ``num_epochs`` and steps once per epoch. Plateau steps on validation
+    loss at every validation pass (``per_validation_pass``, what ``run_training_stage`` does
+    whenever it has a validation loader) or once per epoch otherwise. ``plateau_patience``
+    counts epochs, like ``early_stopping_patience``: the rate is multiplied by
+    ``plateau_factor`` once ``plateau_patience * val_evals_per_epoch`` passes in a row have not
+    improved on the best loss, the same count early stopping uses. Any decrease counts as an
+    improvement, as in early stopping.
     """
 
     lr_scheduler = stage_config.lr_scheduler
@@ -154,11 +169,14 @@ def create_scheduler(stage_config: StageConfig, optimizer: torch.optim.Optimizer
     if lr_scheduler == "cosine":
         return CosineAnnealingLR(optimizer, T_max=max(1, stage_config.num_epochs))
     if lr_scheduler == "plateau":
+        steps_per_epoch = stage_config.val_evals_per_epoch if per_validation_pass else 1
+        # ReduceLROnPlateau cuts the rate once more than ``patience`` steps have not improved.
         return ReduceLROnPlateau(
             optimizer,
             mode="min",
             factor=stage_config.plateau_factor,
-            patience=stage_config.plateau_patience,
+            patience=max(0, stage_config.plateau_patience * steps_per_epoch - 1),
+            threshold=0.0,
             min_lr=stage_config.plateau_min_lr,
         )
     raise ValueError(f"Unknown lr_scheduler: {lr_scheduler}")
@@ -368,6 +386,15 @@ def load_checkpoint(
     return checkpoint
 
 
+def group_learning_rates(optimizer: torch.optim.Optimizer) -> dict[str, float]:
+    """``{"lr_<group name>": rate}`` for each parameter group; unnamed groups are ``group<i>``."""
+
+    return {
+        f"lr_{group.get('name', f'group{i}')}": float(group["lr"])
+        for i, group in enumerate(optimizer.param_groups)
+    }
+
+
 def _default_scheduler_step(scheduler, metrics: dict[str, float]) -> None:
     if scheduler is None:
         return
@@ -391,9 +418,20 @@ def _history_template() -> dict[str, list[float]]:
     }
 
 
-def _append_stage_history(history: dict[str, list[float]], stage_history: dict[str, list[float]]) -> None:
-    for key, values in stage_history.items():
-        history.setdefault(key, []).extend(values)
+def _append_stage_history(history: dict[str, list[Any]], stage_history: dict[str, list[Any]]) -> None:
+    """Extend ``history`` with one stage's lists.
+
+    Learning-rate lists (``lr_<group>``) are aligned with ``val_epoch``. A group absent from a
+    stage, such as the encoder in stage 1, gets ``None`` for that stage's validation passes.
+    """
+
+    n_before = len(history.get("val_epoch", []))
+    n_stage = len(stage_history.get("val_epoch", []))
+    for key in list(dict.fromkeys([*history, *stage_history])):
+        if key.startswith("lr_"):
+            history.setdefault(key, [None] * n_before).extend(stage_history.get(key, [None] * n_stage))
+        elif key in stage_history:
+            history.setdefault(key, []).extend(stage_history[key])
 
 
 def run_training_stage(
@@ -419,11 +457,19 @@ def run_training_stage(
     """Run one training stage under ``stage_config``: its epochs, early stopping and dropout.
 
     ``config`` supplies what the stages share (gradient accumulation and clipping, AMP, the
-    checkpoint save mode).
+    checkpoint save mode). With a validation loader, a ``ReduceLROnPlateau`` scheduler steps
+    at every validation pass (build it with ``create_scheduler``, whose patience assumes
+    this); any other scheduler steps once per epoch through ``scheduler_step``.
+
+    ``epoch_callback`` receives one row per validation pass (``val_loss``, ``val_pearson``)
+    and one per epoch (``train_loss``, ``train_pearson``). Every row carries ``stage``, a
+    possibly fractional ``epoch``, and ``lr_<group>``: the rate each parameter group used for
+    the training just before the row.
     """
 
     device = torch.device(device)
     scheduler_step = scheduler_step or _default_scheduler_step
+    step_per_validation = isinstance(scheduler, ReduceLROnPlateau) and val_loader is not None
     model.head.dropout = stage_config.dropout
     num_epochs = stage_config.num_epochs
     val_evals_per_epoch = stage_config.val_evals_per_epoch
@@ -476,10 +522,23 @@ def run_training_stage(
                 model.eval()
                 model.head.train()
             current_epoch = start_epoch + epoch_idx + (batch_idx / total_batches)
+            learning_rates = group_learning_rates(optimizer)
             history["val_loss"].append(val_metrics["loss"])
             history["val_pearson"].append(val_metrics.get("pearson", float("nan")))
             history["val_epoch"].append(float(current_epoch))
+            for key, rate in learning_rates.items():
+                history.setdefault(key, []).append(rate)
             latest_eval_metrics = val_metrics
+            if epoch_callback is not None:
+                epoch_callback(
+                    {
+                        "stage": stage,
+                        "epoch": float(current_epoch),
+                        "val_loss": val_metrics["loss"],
+                        "val_pearson": val_metrics.get("pearson", float("nan")),
+                        **learning_rates,
+                    }
+                )
 
             if val_metrics["loss"] < best_monitor:
                 best_monitor = val_metrics["loss"]
@@ -495,6 +554,9 @@ def run_training_stage(
                     )
             else:
                 evals_without_improvement += 1
+
+            if step_per_validation:
+                scheduler.step(val_metrics["loss"])
 
             patience_in_evals = stage_config.early_stopping_patience * val_evals_per_epoch
             if evals_without_improvement >= patience_in_evals:
@@ -536,7 +598,9 @@ def run_training_stage(
             else:
                 evals_without_improvement += 1
 
-        scheduler_step(scheduler, latest_eval_metrics)
+        learning_rates = group_learning_rates(optimizer)
+        if not step_per_validation:
+            scheduler_step(scheduler, latest_eval_metrics)
 
         metrics_parts = [
             f"[{stage}] epoch {epoch_number}",
@@ -546,19 +610,19 @@ def run_training_stage(
         if val_metrics is not None:
             metrics_parts.append(f"val_loss={val_metrics['loss']:.4f}")
             metrics_parts.append(f"val_pearson={val_metrics.get('pearson', float('nan')):.4f}")
+        metrics_parts.extend(f"{key}={rate:.2e}" for key, rate in learning_rates.items())
         print(" | ".join(metrics_parts))
 
         if epoch_callback is not None:
-            payload: dict[str, Any] = {
-                "stage": stage,
-                "epoch": float(epoch_number),
-                "train_loss": train_metrics["loss"],
-                "train_pearson": train_metrics.get("pearson", float("nan")),
-            }
-            if val_metrics is not None:
-                payload["val_loss"] = val_metrics["loss"]
-                payload["val_pearson"] = val_metrics.get("pearson", float("nan"))
-            epoch_callback(payload)
+            epoch_callback(
+                {
+                    "stage": stage,
+                    "epoch": float(epoch_number),
+                    "train_loss": train_metrics["loss"],
+                    "train_pearson": train_metrics.get("pearson", float("nan")),
+                    **learning_rates,
+                }
+            )
 
         if should_stop:
             break
@@ -656,7 +720,9 @@ def run_two_stage_training(
     if stage2_scheduler_factory is not None:
         stage2_scheduler = stage2_scheduler_factory(stage2_optimizer)
     else:
-        stage2_scheduler = create_scheduler(config.stage2, stage2_optimizer)
+        stage2_scheduler = create_scheduler(
+            config.stage2, stage2_optimizer, per_validation_pass=val_loader is not None
+        )
         if stage2_scheduler_step is None:
             stage2_scheduler_step = scheduler_stepper(config.stage2.lr_scheduler)
     stage2_result = run_training_stage(
