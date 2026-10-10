@@ -30,21 +30,21 @@ Pretrained backbone weights: https://huggingface.co/gtca/alphagenome_pytorch
 
 ### Initialize
 
-`AlphaGenomeEncoderModel` is the AlphaGenome backbone with a regression head and the reporter `Construct` attached. `from_pretrained` loads the backbone trunk, drops the AlphaGenome output heads and freezes the encoder:
+`AlphaGenomeEncoderModel` is the AlphaGenome backbone with a regression head attached. `from_pretrained` loads the backbone trunk, drops the AlphaGenome output heads and freezes the encoder:
 
 ```python
-from alphagenome_encoder_ft import AlphaGenomeEncoderModel, HeadConfig, LentiMPRAAgarwal2025Library
+from alphagenome_encoder_ft import AlphaGenomeEncoderModel, HeadConfig
 
-construct = LentiMPRAAgarwal2025Library.construct()   # 200 bp insert -> 281 bp model input
+weights_path = "/path/to/alphagenome.safetensors"
+input_length = 256   # length of the sequences the model will see
 device = "cuda"
 
 model = AlphaGenomeEncoderModel.from_pretrained(
-    "alphagenome.safetensors",
+    weights_path,
     HeadConfig(pooling_type="flatten", hidden_sizes=[1024], num_outputs=1),
     device=device,
-    construct=construct,
 )
-model.initialize_head(construct.length, device)   # materializes the lazily-shaped head layers
+model.initialize_head(input_length, device)   # materializes the lazily-shaped head layers
 ```
 
 `initialize_head` runs one dummy forward at the given input length and records that length on the model. It must run before training or before loading head weights.
@@ -66,17 +66,7 @@ python scripts/evaluate_lentimpra.py --checkpoint_path results/mpra_K562/stage2/
 
 `scripts/run_train_lentimpra.sh CELLTYPE` and `scripts/run_evaluate_lentimpra.sh RUN_DIR` wrap those two with the shared paths; both forward extra flags to the Python script. Config files hold training hyperparameters only, and every field has a matching command-line flag that overrides it.
 
-Training runs in two stages. Stage 1 trains the head with the encoder frozen, and stage 2 unfreezes the encoder and continues from the best stage-1 checkpoint. Each stage has its own complete section, and neither inherits from the other:
-
-```json
-"optim":  {"optimizer": "adamw", "weight_decay": 1e-06, "gradient_accumulation_steps": 1, "gradient_clip": null},
-"stage1": {"num_epochs": 100, "early_stopping_patience": 5, "val_evals_per_epoch": 4,
-           "head_lr": 1e-03, "dropout": 0.1, "lr_scheduler": "constant", ...},
-"stage2": {"num_epochs": 50, "early_stopping_patience": 5, "val_evals_per_epoch": 4,
-           "head_lr": 1e-05, "encoder_lr": 1e-05, "dropout": 0.1, "lr_scheduler": "constant", ...}
-```
-
-`optim` holds what the stages share. `"stage2": null`, or `--stage1_only` for one run, trains stage 1 only. Training never touches the test split unless `--evaluate_test` is passed: checkpoints are selected on validation, and the evaluate script scores test afterwards, so a hyperparameter search cannot see test numbers. Each stage's best validation loss and Pearson, from the evaluation that selected `best.pt`, are printed at the end of the stage and written to the wandb run summary as `<stage>/best_val_loss`, `<stage>/best_val_pearson` and `<stage>/best_epoch`; rank runs on those, not on the logged `val_loss`, whose summary is the last evaluation. Stage-section flags carry the section name (`--stage1_num_epochs`, `--stage2_encoder_lr`); the others are the bare field name (`--batch_size`). `--resume_from_stage2` skips stage 1 and restarts stage 2 from `stage1/best.pt`, which recovers a run that hit a wall-clock limit. `early_stopping_patience` and `plateau_patience` both count epochs and are checked at every validation pass: training stops, or the plateau schedule multiplies the rate by `plateau_factor`, once `patience × val_evals_per_epoch` passes in a row have not improved on the best validation loss, so either can trigger mid-epoch. Cosine stepping stays once per epoch. wandb gets one row per validation pass (`val_loss`, `val_pearson`) and one per epoch (`train_loss`, `train_pearson`), plotted against the fractional `epoch`; every row carries the rate of each parameter group as `lr_head` and, in stage 2, `lr_encoder`, and `history.json` has the same rates as `lr_<group>` lists aligned with `val_epoch` (`null` for the encoder in stage 1). `data.drop_last` drops the last incomplete training batch; validation and test always keep every row.
+Training runs in two stages: stage 1 trains the head with the encoder frozen, and stage 2 unfreezes the encoder and continues from the best stage-1 checkpoint. See [configs/lentimpra_K562.json](configs/lentimpra_K562.json) for the available settings. `--stage1_only` skips stage 2, and the test split is scored only with `--evaluate_test` or by the evaluate script.
 
 A run directory:
 
