@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "alphagenome-pytorch @ git+https://github.com/genomicsxai/alphagenome-pytorch.git",
+    "numpy",
     "torch",
 ]
 
