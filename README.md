@@ -14,16 +14,6 @@ As a dependency of another project:
 uv add "alphagenome-encoder-ft @ git+https://github.com/MasayukiNagai/alphagenome-encoder-ft.git"
 ```
 
-For local development:
-
-```bash
-git clone https://github.com/MasayukiNagai/alphagenome-encoder-ft.git
-cd alphagenome-encoder-ft
-uv sync --extra dev --group train
-```
-
-The `train` group (`matplotlib`, `tqdm`, `wandb`) covers progress bars, run logging and evaluation plots; the `dev` extra adds `pytest`. Scoring inserts from a checkpoint needs neither.
-
 Pretrained backbone weights: https://huggingface.co/gtca/alphagenome_pytorch
 
 ## Usage
@@ -49,7 +39,7 @@ model.initialize_head(input_length, device)   # materializes the lazily-shaped h
 
 `initialize_head` runs one dummy forward at the given input length and records that length on the model. It must run before training or before loading head weights.
 
-`HeadConfig` is the head architecture only. Dropout is a training setting: each training stage sets `model.head.dropout` from its own config section.
+`HeadConfig` defines the head architecture only. Dropout is a training setting: each training stage sets `model.head.dropout` from its own config section.
 
 ### Train and evaluate
 
