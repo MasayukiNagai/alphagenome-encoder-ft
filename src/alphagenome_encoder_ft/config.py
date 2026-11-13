@@ -84,9 +84,17 @@ class HeadConfig:
     head_type: str = "mpra"
     num_outputs: int = 1
     norm_type: str = "layer"
+    proj_dim: int | None = None
+    first_layer_rank: int | None = None
 
     def __post_init__(self) -> None:
+        from .heads import _parse_factorization  # lazy, like build_head
+
         self.hidden_sizes = parse_hidden_sizes(self.hidden_sizes)
+        try:
+            self.proj_dim, self.first_layer_rank = _parse_factorization(self.proj_dim, self.first_layer_rank)
+        except ValueError as exc:
+            raise ValueError(f"head.{exc}") from exc
         if self.pooling_type not in {"flatten", "center", "mean", "sum", "max"}:
             raise ValueError("head.pooling_type must be one of flatten, center, mean, sum, max")
         if self.center_bp is not None and self.center_bp <= 0:
@@ -349,4 +357,6 @@ def head_kwargs_of(head: Any) -> dict[str, Any]:
         "activation": head.activation,
         "num_outputs": head.num_outputs,
         "norm_type": head.norm_type,
+        "proj_dim": head.proj_dim,
+        "first_layer_rank": head.first_layer_rank,
     }

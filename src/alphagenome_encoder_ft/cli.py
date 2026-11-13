@@ -80,6 +80,8 @@ _SECTION_FLAGS: dict[str, list[tuple[str, dict[str, Any]]]] = {
         ("pooling_type", {"type": str, "choices": ["flatten", "center", "mean", "sum", "max"]}),
         ("center_bp", {"type": int}),
         ("hidden_sizes", {"type": str}),
+        ("proj_dim", {"type": int}),
+        ("first_layer_rank", {"type": int}),
         ("activation", {"type": str, "choices": ["relu", "gelu"]}),
         ("head_type", {"type": str, "choices": ["mpra", "deepstarr"]}),
         ("num_outputs", {"type": int}),
