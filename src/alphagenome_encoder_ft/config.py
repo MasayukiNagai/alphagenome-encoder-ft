@@ -88,13 +88,11 @@ class HeadConfig:
     first_layer_rank: int | None = None
 
     def __post_init__(self) -> None:
-        from .heads import _parse_factorization  # lazy, like build_head
-
         self.hidden_sizes = parse_hidden_sizes(self.hidden_sizes)
-        try:
-            self.proj_dim, self.first_layer_rank = _parse_factorization(self.proj_dim, self.first_layer_rank)
-        except ValueError as exc:
-            raise ValueError(f"head.{exc}") from exc
+        if self.proj_dim is not None and self.proj_dim <= 0:
+            raise ValueError("head.proj_dim must be > 0")
+        if self.first_layer_rank is not None and self.first_layer_rank <= 0:
+            raise ValueError("head.first_layer_rank must be > 0")
         if self.pooling_type not in {"flatten", "center", "mean", "sum", "max"}:
             raise ValueError("head.pooling_type must be one of flatten, center, mean, sum, max")
         if self.center_bp is not None and self.center_bp <= 0:

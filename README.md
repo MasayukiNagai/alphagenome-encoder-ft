@@ -41,18 +41,6 @@ model.initialize_head(input_length, device)   # materializes the lazily-shaped h
 
 `HeadConfig` defines the head architecture only. Dropout is a training setting: each training stage sets `model.head.dropout` from its own config section.
 
-### Smaller heads
-
-Under `flatten`, the first hidden layer holds nearly all of the head: `L * 1536 * H` weights for `L` encoder bins and hidden width `H` (4.7M for 3 bins and `H = 1024`). Two optional settings factorize that layer. Both are off by default, and both are linear, with no bias, activation or dropout of their own:
-
-| Option | Flag | First layer becomes | Weights |
-|---|---|---|---|
-| `first_layer_rank` (r) | `--first_layer_rank 128` | `Linear(L * 1536, r) -> Linear(r, H)` | `(L * 1536 + H) * r` |
-| `proj_dim` (C) | `--proj_dim 64` | `Linear(1536, C)` shared by every bin, applied before pooling, then the MLP | `1536 * C + L * C * H` |
-| both | `--proj_dim 64 --first_layer_rank 64` | per-bin projection to C, then `Linear(L * C, r) -> Linear(r, H)` | `1536 * C + L * C * r + r * H` |
-
-Lowering `H` barely shrinks a factorized head, since its weights sit mostly in the `L * 1536 * r` factor; lower `r` instead. Heads that set neither option keep their existing state_dict keys, and configs and checkpoints without these fields still load.
-
 ### Train and evaluate
 
 One driver per assay, because the dataset layout and the construct are assay-specific:

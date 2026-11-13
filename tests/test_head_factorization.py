@@ -1,4 +1,4 @@
-"""proj_dim / first_layer_rank: factorize the first hidden layer of the head."""
+"""proj_dim (optional per-position projection) and first_layer_rank (low-rank first hidden layer)."""
 
 from __future__ import annotations
 

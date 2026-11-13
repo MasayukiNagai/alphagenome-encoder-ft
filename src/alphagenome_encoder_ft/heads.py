@@ -31,19 +31,6 @@ def _parse_hidden_sizes(hidden_sizes: int | Sequence[int]) -> list[int]:
     return sizes
 
 
-def _parse_factorization(proj_dim: int | None, first_layer_rank: int | None) -> tuple[int | None, int | None]:
-    """Validated ``proj_dim`` / ``first_layer_rank``; each is optional and they may be combined."""
-
-    if proj_dim is not None and int(proj_dim) <= 0:
-        raise ValueError("proj_dim must be > 0")
-    if first_layer_rank is not None and int(first_layer_rank) <= 0:
-        raise ValueError("first_layer_rank must be > 0")
-    return (
-        None if proj_dim is None else int(proj_dim),
-        None if first_layer_rank is None else int(first_layer_rank),
-    )
-
-
 def _make_activation(name: str) -> nn.Module:
     if name == "relu":
         return nn.ReLU()
@@ -96,18 +83,9 @@ class MPRAHead(nn.Module):
       ``max(1, center_bp // 128)`` because encoder features are at 128 bp
       resolution.
 
-    Two optional settings shrink the first hidden layer, which holds nearly all of the head's
-    parameters under ``flatten`` (``L * 1536 * H``). Both are off by default and are linear
-    (no bias, no activation, no dropout), so each is a factorization of that layer:
-
-    - ``proj_dim`` (C): a ``Linear(1536, C)`` shared by every encoder position, applied after
-      the norm and before pooling, so ``flatten`` sees ``L * C`` features. Costs
-      ``1536 * C + L * C * H`` instead of ``L * 1536 * H``.
-    - ``first_layer_rank`` (r): the first hidden layer becomes ``LazyLinear(r) -> Linear(r, H)``,
-      a rank-r factorization of the full ``(L * 1536) x H`` matrix. Costs ``(L * 1536 + H) * r``.
-
-    They compose: with both set, the projection runs first and the rank-r factor acts on the
-    ``L * C`` pooled features, costing ``1536 * C + L * C * r + r * H``.
+    ``proj_dim``, if set, adds a bias-free ``Linear(1536, proj_dim)`` at every position after
+    the norm. ``first_layer_rank``, if set, makes the first hidden layer low-rank: a bias-free
+    ``Linear(in, r)`` followed by ``Linear(r, H)``, with no activation or dropout between them.
 
     ``norm_type`` selects the normalization applied to the encoder output before the MLP:
 
@@ -136,7 +114,10 @@ class MPRAHead(nn.Module):
             raise ValueError(f"Unknown pooling_type: {pooling_type}")
         if pooling_type in {"mean", "sum", "max"} and center_bp <= 0:
             raise ValueError("center_bp must be > 0")
-        proj_dim, first_layer_rank = _parse_factorization(proj_dim, first_layer_rank)
+        if proj_dim is not None and proj_dim <= 0:
+            raise ValueError("proj_dim must be > 0")
+        if first_layer_rank is not None and first_layer_rank <= 0:
+            raise ValueError("first_layer_rank must be > 0")
         if dropout is not None and not 0 <= dropout < 1:
             raise ValueError("dropout must be in [0, 1)")
         if num_outputs < 1:
@@ -152,7 +133,7 @@ class MPRAHead(nn.Module):
         self.norm = _make_norm(self.norm_type, ENCODER_DIM)
         self.proj_dim = proj_dim
         self.first_layer_rank = first_layer_rank
-        # Registered only when set, so heads without them keep their state_dict keys.
+        # Registered only when set, so other heads keep their state_dict keys.
         if proj_dim is not None:
             self.proj = nn.Linear(ENCODER_DIM, proj_dim, bias=False)
         if first_layer_rank is not None:
