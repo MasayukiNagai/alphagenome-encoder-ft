@@ -295,11 +295,14 @@ def train_epoch(
     regularizer: Callable[[], Tensor] | None = None,
     regularizer_weight: float = 0.0,
     ema: ParameterEMA | None = None,
+    aligned_rc_prob: float | None = None,
 ) -> dict[str, float]:
     """Train for one epoch.
 
     ``regularizer_weight * regularizer()`` is added to the loss that is backpropagated; the
     reported ``loss`` is the data loss alone. ``ema`` is updated after every optimizer step.
+    With ``aligned_rc_prob`` set, each sample is reverse-complemented with that probability
+    inside the model and its encoder bins are flipped back (``encode_aligned_rc``).
     """
 
     device = torch.device(device)
@@ -329,15 +332,24 @@ def train_epoch(
         targets = targets.to(device).float()
         organism_idx = torch.zeros(sequences.shape[0], dtype=torch.long, device=device)
         autocast_ctx = _autocast_context(device, use_amp)
+        rc_mask = None
+        if aligned_rc_prob is not None:
+            rc_mask = torch.rand(sequences.shape[0], device=device) < aligned_rc_prob
 
         if train_encoder:
             with autocast_ctx:
-                preds = model(sequences, organism_idx)
+                if rc_mask is None:
+                    preds = model(sequences, organism_idx)
+                else:
+                    preds = model.predict_from_encoder(model.encode_aligned_rc(sequences, rc_mask, organism_idx))
                 loss = loss_fn(preds, targets)
         else:
             with torch.no_grad():
                 with autocast_ctx:
-                    encoder_output = model.encode(sequences, organism_idx)
+                    if rc_mask is None:
+                        encoder_output = model.encode(sequences, organism_idx)
+                    else:
+                        encoder_output = model.encode_aligned_rc(sequences, rc_mask, organism_idx)
             with autocast_ctx:
                 preds = model.predict_from_encoder(encoder_output)
                 loss = loss_fn(preds, targets)
@@ -684,6 +696,7 @@ def run_training_stage(
             regularizer=regularizer,
             regularizer_weight=l2sp,
             ema=ema,
+            aligned_rc_prob=config.data.rc_prob if config.data.align_rc else None,
         )
         history["train_loss"].append(train_metrics["loss"])
         history["train_pearson"].append(train_metrics.get("pearson", float("nan")))

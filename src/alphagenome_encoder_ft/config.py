@@ -49,6 +49,10 @@ class DataConfig:
     batch_size: int = 32
     reverse_complement: bool = False
     rc_prob: float = 0.5
+    # Reverse-complement in the model instead of the dataset and flip the encoder bins back,
+    # so each bin covers the same bases on both strands. Needs reverse_complement and an input
+    # length that is a multiple of 128 bp.
+    align_rc: bool = False
     random_shift: bool = False
     shift_prob: float = 0.5
     max_shift: int = 15
@@ -63,6 +67,8 @@ class DataConfig:
             raise ValueError("data.subset_frac must be in (0, 1]")
         if not 0 <= self.rc_prob <= 1:
             raise ValueError("data.rc_prob must be in [0, 1]")
+        if self.align_rc and not self.reverse_complement:
+            raise ValueError("data.align_rc needs data.reverse_complement")
         if not 0 <= self.shift_prob <= 1:
             raise ValueError("data.shift_prob must be in [0, 1]")
         if self.max_shift < 0:
