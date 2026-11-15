@@ -83,6 +83,10 @@ class MPRAHead(nn.Module):
       ``max(1, center_bp // 128)`` because encoder features are at 128 bp
       resolution.
 
+    ``proj_dim``, if set, adds a bias-free ``Linear(1536, proj_dim)`` at every position after
+    the norm. ``first_layer_rank``, if set, makes the first hidden layer low-rank: a bias-free
+    ``Linear(in, r)`` followed by ``Linear(r, H)``, with no activation or dropout between them.
+
     ``norm_type`` selects the normalization applied to the encoder output before the MLP:
 
     - ``layer`` (default): ``LayerNorm(1536)`` over the channel dimension, per position.
@@ -102,12 +106,18 @@ class MPRAHead(nn.Module):
         activation: Literal["relu", "gelu"] = "relu",
         num_outputs: int = 1,
         norm_type: NormType = "layer",
+        proj_dim: int | None = None,
+        first_layer_rank: int | None = None,
     ) -> None:
         super().__init__()
         if pooling_type not in {"flatten", "center", "mean", "sum", "max"}:
             raise ValueError(f"Unknown pooling_type: {pooling_type}")
         if pooling_type in {"mean", "sum", "max"} and center_bp <= 0:
             raise ValueError("center_bp must be > 0")
+        if proj_dim is not None and proj_dim <= 0:
+            raise ValueError("proj_dim must be > 0")
+        if first_layer_rank is not None and first_layer_rank <= 0:
+            raise ValueError("first_layer_rank must be > 0")
         if dropout is not None and not 0 <= dropout < 1:
             raise ValueError("dropout must be in [0, 1)")
         if num_outputs < 1:
@@ -121,8 +131,15 @@ class MPRAHead(nn.Module):
         self.num_outputs = int(num_outputs)
         self.norm_type = "none" if norm_type is None else str(norm_type).lower()
         self.norm = _make_norm(self.norm_type, ENCODER_DIM)
+        self.proj_dim = proj_dim
+        self.first_layer_rank = first_layer_rank
+        # Registered only when set, so other heads keep their state_dict keys.
+        if proj_dim is not None:
+            self.proj = nn.Linear(ENCODER_DIM, proj_dim, bias=False)
+        if first_layer_rank is not None:
+            self.first_layer_factor = nn.LazyLinear(first_layer_rank, bias=False)
         self.hidden_layers = nn.ModuleList()
-        in_features: int | None = None
+        in_features: int | None = first_layer_rank
         for hidden_size in self.hidden_sizes:
             linear = nn.LazyLinear(hidden_size) if in_features is None else nn.Linear(in_features, hidden_size)
             self.hidden_layers.append(linear)
@@ -131,6 +148,8 @@ class MPRAHead(nn.Module):
         self.output_layer = nn.Linear(in_features, self.num_outputs)
 
     def _apply_hidden_layers(self, x: torch.Tensor) -> torch.Tensor:
+        if self.first_layer_rank is not None:
+            x = self.first_layer_factor(x)
         for linear in self.hidden_layers:
             x = linear(x)
             if self.dropout is not None:
@@ -174,6 +193,8 @@ class MPRAHead(nn.Module):
 
     def forward(self, encoder_output: torch.Tensor) -> torch.Tensor:
         x = self._normalize_encoder_output(encoder_output)
+        if self.proj_dim is not None:
+            x = self.proj(x)
         if self.pooling_type == "flatten":
             x = x.flatten(1)
             x = self._apply_hidden_layers(x)
@@ -203,6 +224,8 @@ class DeepSTARRHead(MPRAHead):
         activation: Literal["relu", "gelu"] = "relu",
         num_outputs: int = 2,
         norm_type: NormType = "layer",
+        proj_dim: int | None = None,
+        first_layer_rank: int | None = None,
     ) -> None:
         super().__init__(
             pooling_type=pooling_type,
@@ -212,4 +235,6 @@ class DeepSTARRHead(MPRAHead):
             activation=activation,
             num_outputs=num_outputs,
             norm_type=norm_type,
+            proj_dim=proj_dim,
+            first_layer_rank=first_layer_rank,
         )

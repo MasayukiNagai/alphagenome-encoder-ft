@@ -84,9 +84,15 @@ class HeadConfig:
     head_type: str = "mpra"
     num_outputs: int = 1
     norm_type: str = "layer"
+    proj_dim: int | None = None
+    first_layer_rank: int | None = None
 
     def __post_init__(self) -> None:
         self.hidden_sizes = parse_hidden_sizes(self.hidden_sizes)
+        if self.proj_dim is not None and self.proj_dim <= 0:
+            raise ValueError("head.proj_dim must be > 0")
+        if self.first_layer_rank is not None and self.first_layer_rank <= 0:
+            raise ValueError("head.first_layer_rank must be > 0")
         if self.pooling_type not in {"flatten", "center", "mean", "sum", "max"}:
             raise ValueError("head.pooling_type must be one of flatten, center, mean, sum, max")
         if self.center_bp is not None and self.center_bp <= 0:
@@ -349,4 +355,6 @@ def head_kwargs_of(head: Any) -> dict[str, Any]:
         "activation": head.activation,
         "num_outputs": head.num_outputs,
         "norm_type": head.norm_type,
+        "proj_dim": head.proj_dim,
+        "first_layer_rank": head.first_layer_rank,
     }
