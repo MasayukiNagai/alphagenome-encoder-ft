@@ -28,6 +28,7 @@ from torch.utils.data import Dataset
 from .config import TrainConfig, load_train_config, merge_train_config, parse_hidden_sizes
 from .constructs import Construct
 from .data import create_dataloader
+from .heads import ENCODER_RESOLUTION_BP
 from .metrics import regression_metrics
 from .model import AlphaGenomeEncoderModel
 from .train import (
@@ -72,6 +73,7 @@ _SECTION_FLAGS: dict[str, list[tuple[str, dict[str, Any]]]] = {
         ("rc_prob", {"type": float}),
         ("shift_prob", {"type": float}),
         ("reverse_complement", {"action": argparse.BooleanOptionalAction}),
+        ("align_rc", {"action": argparse.BooleanOptionalAction}),
         ("random_shift", {"action": argparse.BooleanOptionalAction}),
         ("pin_memory", {"action": argparse.BooleanOptionalAction}),
         ("drop_last", {"action": argparse.BooleanOptionalAction}),
@@ -199,10 +201,13 @@ def resolve_construct(args: argparse.Namespace, default: Construct | None) -> Co
 
 
 def dataset_kwargs(config: TrainConfig, *, augment: bool) -> dict[str, Any]:
-    """``MPRADataset`` keyword arguments from config; augmentation only when ``augment``."""
+    """``MPRADataset`` keyword arguments from config; augmentation only when ``augment``.
+
+    With ``data.align_rc`` the model does the reverse complement, so the dataset does not.
+    """
 
     return {
-        "reverse_complement": config.data.reverse_complement if augment else False,
+        "reverse_complement": (config.data.reverse_complement and not config.data.align_rc) if augment else False,
         "rc_prob": config.data.rc_prob,
         "random_shift": config.data.random_shift if augment else False,
         "shift_prob": config.data.shift_prob,
@@ -264,6 +269,11 @@ def train(
     else:
         input_length = int(train_dataset[0][0].shape[0])
     print(f"Model input length: {input_length}")
+    if config.data.align_rc and input_length % ENCODER_RESOLUTION_BP:
+        raise ValueError(
+            f"data.align_rc needs an input length that is a multiple of {ENCODER_RESOLUTION_BP} bp, "
+            f"got {input_length}; pad the construct with --construct_length"
+        )
 
     with open(run_dir / "config.json", "w") as handle:
         json.dump(config.to_dict(), handle, indent=2)

@@ -15,6 +15,7 @@ from alphagenome_pytorch.utils.sequence import sequence_to_onehot_tensor
 
 from .config import HeadConfig, TrainConfig, build_head
 from .constructs import Construct
+from .heads import ENCODER_DIM, ENCODER_RESOLUTION_BP
 
 
 class AlphaGenomeEncoderModel(nn.Module):
@@ -53,6 +54,27 @@ class AlphaGenomeEncoderModel(nn.Module):
             organism_idx = torch.zeros(sequences.shape[0], dtype=torch.long, device=sequences.device)
         outputs = self.backbone(sequences, organism_idx, encoder_only=True)
         return outputs["encoder_output"]
+
+    def encode_aligned_rc(self, sequences: Tensor, rc_mask: Tensor, organism_idx: Tensor | None = None) -> Tensor:
+        """``encode`` with the samples in ``rc_mask`` reverse-complemented, their bins flipped back.
+
+        A reverse-complemented input yields its encoder bins in reverse order. Flipping them
+        restores the forward order, so each bin the head sees covers the same bases on either
+        strand. That holds exactly only when the input length is a multiple of the encoder's
+        128 bp bin, since the encoder pads a ragged last bin on the right.
+        """
+
+        if sequences.shape[1] % ENCODER_RESOLUTION_BP:
+            raise ValueError(
+                f"aligned RC needs an input length that is a multiple of {ENCODER_RESOLUTION_BP} bp, "
+                f"got {sequences.shape[1]}; pad the construct (e.g. --construct_length)"
+            )
+        mask = rc_mask.view(-1, 1, 1)
+        reverse_complement = sequences.flip(1)[..., [3, 2, 1, 0]]
+        encoded = self.encode(torch.where(mask, reverse_complement, sequences), organism_idx)
+        # The encoder emits (B, 1536, bins); a backbone emitting (B, bins, 1536) works too.
+        bin_dim = 1 if encoded.shape[-1] == ENCODER_DIM else -1
+        return torch.where(mask, encoded.flip(bin_dim), encoded)
 
     def predict_from_encoder(self, encoder_output: Tensor) -> Tensor:
         return self.head(encoder_output)

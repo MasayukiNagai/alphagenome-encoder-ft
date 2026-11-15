@@ -209,8 +209,13 @@ def train_epoch(
     grad_clip: float | None = None,
     show_progress: bool = False,
     batch_end_callback: Callable[[int, int], bool] | None = None,
+    aligned_rc_prob: float | None = None,
 ) -> dict[str, float]:
-    """Train for one epoch."""
+    """Train for one epoch.
+
+    With ``aligned_rc_prob`` set, each sample is reverse-complemented with that probability
+    inside the model and its encoder bins are flipped back (``encode_aligned_rc``).
+    """
 
     device = torch.device(device)
     loss_fn = loss_fn or _default_loss_fn
@@ -239,15 +244,24 @@ def train_epoch(
         targets = targets.to(device).float()
         organism_idx = torch.zeros(sequences.shape[0], dtype=torch.long, device=device)
         autocast_ctx = _autocast_context(device, use_amp)
+        rc_mask = None
+        if aligned_rc_prob is not None:
+            rc_mask = torch.rand(sequences.shape[0], device=device) < aligned_rc_prob
 
         if train_encoder:
             with autocast_ctx:
-                preds = model(sequences, organism_idx)
+                if rc_mask is None:
+                    preds = model(sequences, organism_idx)
+                else:
+                    preds = model.predict_from_encoder(model.encode_aligned_rc(sequences, rc_mask, organism_idx))
                 loss = loss_fn(preds, targets)
         else:
             with torch.no_grad():
                 with autocast_ctx:
-                    encoder_output = model.encode(sequences, organism_idx)
+                    if rc_mask is None:
+                        encoder_output = model.encode(sequences, organism_idx)
+                    else:
+                        encoder_output = model.encode_aligned_rc(sequences, rc_mask, organism_idx)
             with autocast_ctx:
                 preds = model.predict_from_encoder(encoder_output)
                 loss = loss_fn(preds, targets)
@@ -577,6 +591,7 @@ def run_training_stage(
             grad_clip=config.optim.gradient_clip,
             show_progress=show_progress,
             batch_end_callback=_validate_if_needed if val_loader is not None else None,
+            aligned_rc_prob=config.data.rc_prob if config.data.align_rc else None,
         )
         history["train_loss"].append(train_metrics["loss"])
         history["train_pearson"].append(train_metrics.get("pearson", float("nan")))
