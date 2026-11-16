@@ -106,9 +106,25 @@ class AlphaGenomeEncoderModel(nn.Module):
             _ = self.predict_from_encoder(self.encode(dummy_sequence, dummy_organism_idx))
         self.input_length = int(sequence_length)
 
-    def set_encoder_trainable(self, trainable: bool) -> None:
+    def set_encoder_trainable(self, trainable: bool, *, top_blocks: int | None = None) -> None:
+        """Freeze or unfreeze the encoder; with ``top_blocks``, unfreeze only its last down blocks.
+
+        ``top_blocks=k`` leaves the DNA embedder and all but the last ``k`` of
+        ``encoder.down_blocks`` frozen (norm scales and biases included).
+        """
+
         for param in self.encoder.parameters():
-            param.requires_grad = trainable
+            param.requires_grad = trainable and top_blocks is None
+        if not trainable or top_blocks is None:
+            return
+        blocks = getattr(self.encoder, "down_blocks", None)
+        if blocks is None:
+            raise AttributeError("encoder has no down_blocks; top_blocks needs the AlphaGenome encoder layout")
+        if not 1 <= top_blocks <= len(blocks):
+            raise ValueError(f"top_blocks must be in [1, {len(blocks)}], got {top_blocks}")
+        for block in list(blocks)[-top_blocks:]:
+            for param in block.parameters():
+                param.requires_grad = True
 
     def trainable_parameters(self, include_encoder: bool) -> list[nn.Parameter]:
         params = list(self.head.parameters())

@@ -174,17 +174,35 @@ class StageConfig:
 
 @dataclass
 class Stage2Config(StageConfig):
-    """Stage 2: the encoder is unfrozen and trains at ``encoder_lr``, the head at ``head_lr``."""
+    """Stage 2: the encoder is unfrozen and trains at ``encoder_lr``, the head at ``head_lr``.
+
+    ``encoder_top_blocks``: train only this many of the encoder's last down blocks; the DNA
+    embedder and the lower blocks stay frozen. ``None`` trains the whole encoder.
+    ``ema_decay``: keep an exponential moving average of the trainable weights (per optimizer
+    step); validation, the scheduler, early stopping and ``best.pt`` use the averaged weights.
+    ``l2sp``: weight of a penalty on the squared distance of the trainable encoder weights from
+    their values at the start of stage 2 (L2-SP), with weight-standardized convolutions
+    compared after standardization.
+    """
 
     SECTION: ClassVar[str] = "stage2"
 
     head_lr: float = 1e-5
     encoder_lr: float = 1e-5
+    encoder_top_blocks: int | None = None
+    ema_decay: float | None = None
+    l2sp: float = 0.0
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.encoder_lr <= 0:
             raise ValueError("stage2.encoder_lr must be > 0")
+        if self.encoder_top_blocks is not None and self.encoder_top_blocks < 1:
+            raise ValueError("stage2.encoder_top_blocks must be >= 1")
+        if self.ema_decay is not None and not 0 < self.ema_decay < 1:
+            raise ValueError("stage2.ema_decay must be in (0, 1)")
+        if self.l2sp < 0:
+            raise ValueError("stage2.l2sp must be >= 0")
 
 
 @dataclass

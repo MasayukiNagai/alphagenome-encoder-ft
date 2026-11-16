@@ -9,9 +9,9 @@ objects, and laying out a run directory around them, is :mod:`alphagenome_encode
 from __future__ import annotations
 
 import math
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import torch
 import torch.nn.functional as F
@@ -57,6 +57,89 @@ def _autocast_context(device: torch.device, use_amp: bool):
 
 def _default_loss_fn(preds: Tensor, targets: Tensor) -> Tensor:
     return F.mse_loss(preds.float(), targets.float())
+
+
+class ParameterEMA:
+    """Exponential moving average of a model's trainable parameters.
+
+    ``update`` after each optimizer step; ``applied()`` swaps the averages in for the duration
+    of a ``with`` block (validation, checkpointing) and restores the live weights after. The
+    decay warms up as ``min(decay, (1 + n) / (10 + n))`` over the first updates, so early
+    averages are not dominated by the starting weights.
+    """
+
+    def __init__(self, model: torch.nn.Module, decay: float) -> None:
+        if not 0 < decay < 1:
+            raise ValueError("decay must be in (0, 1)")
+        self.decay = decay
+        self.num_updates = 0
+        self.params = {name: p for name, p in model.named_parameters() if p.requires_grad}
+        self.shadow = {name: p.detach().clone() for name, p in self.params.items()}
+
+    @torch.no_grad()
+    def update(self) -> None:
+        self.num_updates += 1
+        decay = min(self.decay, (1 + self.num_updates) / (10 + self.num_updates))
+        for name, param in self.params.items():
+            self.shadow[name].mul_(decay).add_(param.detach(), alpha=1 - decay)
+
+    @contextmanager
+    def applied(self) -> Iterator[None]:
+        live = {name: p.detach().clone() for name, p in self.params.items()}
+        with torch.no_grad():
+            for name, param in self.params.items():
+                param.copy_(self.shadow[name])
+        try:
+            yield
+        finally:
+            with torch.no_grad():
+                for name, param in self.params.items():
+                    param.copy_(live[name])
+
+
+def _standardized_kernel(conv: torch.nn.Module) -> Tensor:
+    """The weight-standardized kernel of an AlphaGenome ``StandardizedConv1d``, without its ``scale``."""
+
+    w = conv.weight.float()
+    mean = w.mean(dim=(1, 2), keepdim=True)
+    var = w.var(dim=(1, 2), keepdim=True, unbiased=False)
+    fan_in = conv.in_channels * conv.kernel_size[0]
+    return (w - mean) * torch.rsqrt(torch.clamp(var * fan_in, min=1e-4))
+
+
+def _is_standardized_conv(module: torch.nn.Module) -> bool:
+    return isinstance(module, torch.nn.Conv1d) and isinstance(getattr(module, "scale", None), torch.nn.Parameter)
+
+
+def make_l2sp_penalty(encoder: torch.nn.Module) -> Callable[[], Tensor]:
+    """L2-SP: squared distance of the trainable encoder parameters from their current values.
+
+    The current values (the start of stage 2, i.e. the pretrained encoder) are the anchor.
+    A weight-standardized convolution's output depends on its kernel only through the
+    standardized kernel, so that is what is compared; its ``scale`` and every other parameter
+    (biases, norm scales) are compared as they are. Frozen parameters are skipped.
+    """
+
+    standardized = {f"{name}.weight" for name, module in encoder.named_modules() if _is_standardized_conv(module)}
+    modules = dict(encoder.named_modules())
+
+    def view(name: str, param: Tensor) -> Tensor:
+        if name in standardized:
+            return _standardized_kernel(modules[name.rsplit(".", 1)[0]])
+        return param.float()
+
+    names = [name for name, p in encoder.named_parameters() if p.requires_grad]
+    params = dict(encoder.named_parameters())
+    with torch.no_grad():
+        anchor = {name: view(name, params[name]).detach().clone() for name in names}
+
+    def penalty() -> Tensor:
+        total = torch.zeros((), device=next(iter(anchor.values())).device) if anchor else torch.zeros(())
+        for name in names:
+            total = total + (view(name, params[name]) - anchor[name]).pow(2).sum()
+        return total
+
+    return penalty
 
 
 def _compute_metrics(
@@ -209,8 +292,15 @@ def train_epoch(
     grad_clip: float | None = None,
     show_progress: bool = False,
     batch_end_callback: Callable[[int, int], bool] | None = None,
+    regularizer: Callable[[], Tensor] | None = None,
+    regularizer_weight: float = 0.0,
+    ema: ParameterEMA | None = None,
 ) -> dict[str, float]:
-    """Train for one epoch."""
+    """Train for one epoch.
+
+    ``regularizer_weight * regularizer()`` is added to the loss that is backpropagated; the
+    reported ``loss`` is the data loss alone. ``ema`` is updated after every optimizer step.
+    """
 
     device = torch.device(device)
     loss_fn = loss_fn or _default_loss_fn
@@ -252,7 +342,10 @@ def train_epoch(
                 preds = model.predict_from_encoder(encoder_output)
                 loss = loss_fn(preds, targets)
 
-        (loss / gradient_accumulation_steps).backward()
+        objective = loss
+        if regularizer is not None and regularizer_weight > 0:
+            objective = loss + regularizer_weight * regularizer()
+        (objective / gradient_accumulation_steps).backward()
 
         if batch_idx % gradient_accumulation_steps == 0 or batch_idx == len(train_loader):
             if grad_clip is not None:
@@ -261,6 +354,8 @@ def train_epoch(
                     torch.nn.utils.clip_grad_norm_(model.encoder.parameters(), grad_clip)
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
+            if ema is not None:
+                ema.update()
 
         batch_size = targets.shape[0]
         total_samples += batch_size
@@ -477,6 +572,13 @@ def run_training_stage(
     if stage_dir is not None:
         stage_dir.mkdir(parents=True, exist_ok=True)
 
+    # Stage-2 regularizers (absent from stage 1's config): weight averaging and L2-SP.
+    ema_decay = getattr(stage_config, "ema_decay", None)
+    ema = ParameterEMA(model, ema_decay) if ema_decay is not None else None
+    averaged = ema.applied if ema is not None else nullcontext
+    l2sp = float(getattr(stage_config, "l2sp", 0.0) or 0.0)
+    regularizer = make_l2sp_penalty(model.encoder) if l2sp > 0 and train_encoder else None
+
     history = _history_template()
     best_monitor = math.inf
     best_epoch: float = float(start_epoch)
@@ -506,14 +608,15 @@ def run_training_stage(
             if val_loader is None or batch_idx not in val_eval_points:
                 return True
 
-            val_metrics = evaluate(
-                model,
-                val_loader,
-                device,
-                loss_fn=loss_fn,
-                metric_fns=metric_fns,
-                use_amp=config.runtime.use_amp,
-            )
+            with averaged():
+                val_metrics = evaluate(
+                    model,
+                    val_loader,
+                    device,
+                    loss_fn=loss_fn,
+                    metric_fns=metric_fns,
+                    use_amp=config.runtime.use_amp,
+                )
             # ``evaluate`` switches the module to eval mode; restore the active
             # training mode before continuing with the rest of the epoch.
             if train_encoder:
@@ -546,12 +649,13 @@ def run_training_stage(
                 best_val_metrics = dict(val_metrics)
                 evals_without_improvement = 0
                 if stage_dir is not None:
-                    best_checkpoint_path = save_checkpoint(
-                        stage_dir / "best.pt",
-                        model,
-                        save_mode=config.checkpoint.save_mode,
-                        config=config,
-                    )
+                    with averaged():
+                        best_checkpoint_path = save_checkpoint(
+                            stage_dir / "best.pt",
+                            model,
+                            save_mode=config.checkpoint.save_mode,
+                            config=config,
+                        )
             else:
                 evals_without_improvement += 1
 
@@ -577,6 +681,9 @@ def run_training_stage(
             grad_clip=config.optim.gradient_clip,
             show_progress=show_progress,
             batch_end_callback=_validate_if_needed if val_loader is not None else None,
+            regularizer=regularizer,
+            regularizer_weight=l2sp,
+            ema=ema,
         )
         history["train_loss"].append(train_metrics["loss"])
         history["train_pearson"].append(train_metrics.get("pearson", float("nan")))
@@ -589,12 +696,13 @@ def run_training_stage(
                 best_epoch = float(epoch_number)
                 evals_without_improvement = 0
                 if stage_dir is not None:
-                    best_checkpoint_path = save_checkpoint(
-                        stage_dir / "best.pt",
-                        model,
-                        save_mode=config.checkpoint.save_mode,
-                        config=config,
-                    )
+                    with averaged():
+                        best_checkpoint_path = save_checkpoint(
+                            stage_dir / "best.pt",
+                            model,
+                            save_mode=config.checkpoint.save_mode,
+                            config=config,
+                        )
             else:
                 evals_without_improvement += 1
 
@@ -715,7 +823,7 @@ def run_two_stage_training(
     best_stage1_path = stage1_result["best_checkpoint_path"] or str(stage1_dir / "best.pt")
     load_checkpoint(best_stage1_path, model)
 
-    model.set_encoder_trainable(True)
+    model.set_encoder_trainable(True, top_blocks=config.stage2.encoder_top_blocks)
     stage2_optimizer = stage2_optimizer_factory(model)
     if stage2_scheduler_factory is not None:
         stage2_scheduler = stage2_scheduler_factory(stage2_optimizer)
