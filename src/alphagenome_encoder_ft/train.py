@@ -457,6 +457,8 @@ def save_checkpoint(
         "construct": model.construct.to_dict() if model.construct is not None else None,
         "input_length": int(model.input_length),
     }
+    if getattr(model, "encoder_locon_rank", None) is not None:
+        payload["encoder_locon_rank"] = int(model.encoder_locon_rank)
     if config is not None:
         payload["config"] = config.to_dict()
 
@@ -836,7 +838,10 @@ def run_two_stage_training(
     best_stage1_path = stage1_result["best_checkpoint_path"] or str(stage1_dir / "best.pt")
     load_checkpoint(best_stage1_path, model)
 
-    model.set_encoder_trainable(True, top_blocks=config.stage2.encoder_top_blocks)
+    if config.stage2.encoder_locon_rank is not None:
+        model.add_encoder_locon(config.stage2.encoder_locon_rank)
+    else:
+        model.set_encoder_trainable(True, top_blocks=config.stage2.encoder_top_blocks)
     stage2_optimizer = stage2_optimizer_factory(model)
     if stage2_scheduler_factory is not None:
         stage2_scheduler = stage2_scheduler_factory(stage2_optimizer)

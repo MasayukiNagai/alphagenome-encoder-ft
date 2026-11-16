@@ -102,6 +102,7 @@ _SECTION_FLAGS: dict[str, list[tuple[str, dict[str, Any]]]] = {
         ("encoder_top_blocks", {"type": int}),
         ("ema_decay", {"type": float}),
         ("l2sp", {"type": float}),
+        ("encoder_locon_rank", {"type": int}),
     ],
     "checkpoint": [
         ("pretrained_weights", {"type": str}),

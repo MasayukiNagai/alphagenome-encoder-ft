@@ -38,6 +38,7 @@ class AlphaGenomeEncoderModel(nn.Module):
         self.head = head
         self.construct = construct
         self.input_length: int | None = None
+        self.encoder_locon_rank: int | None = None
 
     @property
     def encoder(self) -> nn.Module:
@@ -127,6 +128,26 @@ class AlphaGenomeEncoderModel(nn.Module):
             dummy_organism_idx = torch.zeros(1, dtype=torch.long, device=device)
             _ = self.predict_from_encoder(self.encode(dummy_sequence, dummy_organism_idx))
         self.input_length = int(sequence_length)
+
+    def add_encoder_locon(self, rank: int) -> list[str]:
+        """Add rank-``rank`` LoCon adapters to the encoder's block convolutions and train only them.
+
+        Every base encoder parameter is frozen; the new adapter weights are trainable. The rank
+        is recorded so checkpoints can rebuild the adapters (``from_checkpoint``).
+        """
+
+        from .adapters import LoConConv1d, add_locon
+
+        if self.encoder_locon_rank is not None:
+            raise ValueError("the encoder already has LoCon adapters")
+        self.set_encoder_trainable(False)
+        wrapped = add_locon(self.encoder, rank)
+        for module in self.encoder.modules():
+            if isinstance(module, LoConConv1d):
+                module.up.requires_grad_(True)
+                module.down.requires_grad_(True)
+        self.encoder_locon_rank = int(rank)
+        return wrapped
 
     def set_encoder_trainable(self, trainable: bool, *, top_blocks: int | None = None) -> None:
         """Freeze or unfreeze the encoder; with ``top_blocks``, unfreeze only its last down blocks.
@@ -220,6 +241,8 @@ class AlphaGenomeEncoderModel(nn.Module):
         model.to(device)
         model.initialize_head(int(checkpoint["input_length"]), device)
 
+        if checkpoint.get("encoder_locon_rank") is not None:
+            model.add_encoder_locon(int(checkpoint["encoder_locon_rank"]))
         if save_mode == "minimal":
             model.encoder.load_state_dict(checkpoint["encoder_state_dict"])
         elif save_mode == "full":
