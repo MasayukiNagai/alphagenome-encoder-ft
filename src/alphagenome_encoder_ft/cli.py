@@ -94,7 +94,11 @@ _SECTION_FLAGS: dict[str, list[tuple[str, dict[str, Any]]]] = {
         ("gradient_clip", {"type": float}),
     ],
     "stage1": _STAGE_FLAGS,
-    "stage2": [*_STAGE_FLAGS, ("encoder_lr", {"type": float})],
+    "stage2": [
+        *_STAGE_FLAGS,
+        ("encoder_lr", {"type": float}),
+        ("ema_decay", {"type": float}),
+    ],
     "checkpoint": [
         ("pretrained_weights", {"type": str}),
         ("checkpoint_dir", {"type": str}),

@@ -174,17 +174,24 @@ class StageConfig:
 
 @dataclass
 class Stage2Config(StageConfig):
-    """Stage 2: the encoder is unfrozen and trains at ``encoder_lr``, the head at ``head_lr``."""
+    """Stage 2: the encoder is unfrozen and trains at ``encoder_lr``, the head at ``head_lr``.
+
+    ``ema_decay``: keep an exponential moving average of the trainable weights (per optimizer
+    step); validation, the scheduler, early stopping and ``best.pt`` use the averaged weights.
+    """
 
     SECTION: ClassVar[str] = "stage2"
 
     head_lr: float = 1e-5
     encoder_lr: float = 1e-5
+    ema_decay: float | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.encoder_lr <= 0:
             raise ValueError("stage2.encoder_lr must be > 0")
+        if self.ema_decay is not None and not 0 < self.ema_decay < 1:
+            raise ValueError("stage2.ema_decay must be in (0, 1)")
 
 
 @dataclass
