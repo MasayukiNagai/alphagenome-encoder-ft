@@ -41,6 +41,26 @@ class LoConConv1d(nn.Module):
         return self.base(x) + F.conv1d(low_rank, self.up.to(x.dtype))
 
 
+def locon_state_dict_from_plain(state_dict: dict[str, Tensor], module: nn.Module, prefix: str = "") -> dict[str, Tensor]:
+    """Map a state dict saved without adapters onto ``module``, which has them.
+
+    Each wrapped convolution's saved weights move to ``<conv>.base.*``; its adapter takes
+    ``down`` from the module and a zero ``up``, a no-op update, so the loaded model computes
+    what the saved one did. ``prefix`` is ``module``'s name inside ``state_dict``'s owner.
+    """
+
+    out = dict(state_dict)
+    for name, sub in module.named_modules():
+        if not isinstance(sub, LoConConv1d):
+            continue
+        path = f"{prefix}{name}."
+        for key in [k for k in state_dict if k.startswith(path) and not k.startswith(path + "base.")]:
+            out[path + "base." + key[len(path):]] = out.pop(key)
+        out[path + "down"] = sub.down.detach().clone()
+        out[path + "up"] = torch.zeros_like(sub.up)
+    return out
+
+
 def add_locon(module: nn.Module, rank: int) -> list[str]:
     """Wrap every ``conv`` child that is a ``Conv1d`` in ``LoConConv1d``; return the wrapped names.
 

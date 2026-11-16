@@ -17,7 +17,13 @@ from alphagenome_encoder_ft.adapters import LoConConv1d, add_locon
 from alphagenome_encoder_ft.config import Stage2Config
 from alphagenome_encoder_ft.heads import MPRAHead
 from alphagenome_encoder_ft.model import AlphaGenomeEncoderModel
-from alphagenome_encoder_ft.train import create_stage1_optimizer, create_stage2_optimizer, run_two_stage_training, save_checkpoint
+from alphagenome_encoder_ft.train import (
+    create_stage1_optimizer,
+    create_stage2_optimizer,
+    load_checkpoint,
+    run_two_stage_training,
+    save_checkpoint,
+)
 from conftest import make_config
 
 
@@ -132,6 +138,26 @@ def test_checkpoint_roundtrip_rebuilds_adapters(tmp_path: Path):
     restored = AlphaGenomeEncoderModel.from_checkpoint(path, device="cpu", backbone_factory=ConvBackbone)
     with torch.no_grad():
         assert torch.allclose(restored(x), before, atol=1e-6)
+
+
+@pytest.mark.parametrize("save_mode", ["minimal", "full"])
+def test_plain_checkpoint_loads_into_a_locon_model_as_a_no_op(tmp_path: Path, save_mode: str):
+    # The stage-1 best.pt has no adapters; --evaluate_test reloads it after stage 2 added them.
+    model, x = _model(), _x()
+    model.eval()
+    with torch.no_grad():
+        plain = model(x)
+    path = save_checkpoint(tmp_path / "plain.pt", model, save_mode=save_mode, config=make_config(tmp_path))
+    model.add_encoder_locon(2)
+    with torch.no_grad():
+        for module in model.encoder.modules():
+            if isinstance(module, LoConConv1d):
+                module.up.normal_()
+                module.base.weight.add_(1.0)
+    load_checkpoint(path, model)
+    with torch.no_grad():
+        assert torch.allclose(model(x), plain, atol=1e-6)
+    assert all(m.up.abs().sum() == 0 for m in model.encoder.modules() if isinstance(m, LoConConv1d))
 
 
 @pytest.mark.parametrize(
