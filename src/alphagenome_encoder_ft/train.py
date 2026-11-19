@@ -787,7 +787,7 @@ def run_two_stage_training(
     if config.stage2.encoder_locon_rank is not None:
         model.add_encoder_locon(
             config.stage2.encoder_locon_rank,
-            train_conv1=config.stage2.encoder_locon_train_conv1,
+            unfreeze_first_conv=config.stage2.encoder_unfreeze_first_conv,
         )
     else:
         model.set_encoder_trainable(True)

@@ -176,12 +176,13 @@ class StageConfig:
 class Stage2Config(StageConfig):
     """Stage 2: the encoder is unfrozen and trains at ``encoder_lr``, the head at ``head_lr``.
 
-    ``ema_decay``: keep an exponential moving average of the trainable weights (per optimizer
-    step); validation, the scheduler, early stopping and ``best.pt`` use the averaged weights.
+    ``ema_decay``: keep an exponential moving average of every trainable weight (the encoder
+    or its LoCon adapters, and the head), updated per optimizer step; validation, the
+    scheduler, early stopping and ``best.pt`` use the averaged weights. Stage 1 has no EMA.
     ``encoder_locon_rank``: freeze the encoder and train rank-r LoCon adapters on every block
     convolution instead (``AlphaGenomeEncoderModel.add_encoder_locon``).
-    ``encoder_locon_train_conv1``: also train the DNA embedder's first convolution, which has
-    no adapter, in full. Needs ``encoder_locon_rank``.
+    ``encoder_unfreeze_first_conv``: with LoCon, also train the encoder's first convolution
+    (the DNA embedder's ``conv1``, which has no adapter) in full. Needs ``encoder_locon_rank``.
     """
 
     SECTION: ClassVar[str] = "stage2"
@@ -190,7 +191,7 @@ class Stage2Config(StageConfig):
     encoder_lr: float = 1e-5
     ema_decay: float | None = None
     encoder_locon_rank: int | None = None
-    encoder_locon_train_conv1: bool = False
+    encoder_unfreeze_first_conv: bool = False
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -200,8 +201,11 @@ class Stage2Config(StageConfig):
             raise ValueError("stage2.ema_decay must be in (0, 1)")
         if self.encoder_locon_rank is not None and self.encoder_locon_rank < 1:
             raise ValueError("stage2.encoder_locon_rank must be >= 1")
-        if self.encoder_locon_rank is None and self.encoder_locon_train_conv1:
-            raise ValueError("stage2.encoder_locon_train_conv1 needs stage2.encoder_locon_rank")
+        if self.encoder_locon_rank is None and self.encoder_unfreeze_first_conv:
+            raise ValueError(
+                "stage2.encoder_unfreeze_first_conv needs stage2.encoder_locon_rank "
+                "(without LoCon the whole encoder trains)"
+            )
 
 
 @dataclass

@@ -164,7 +164,7 @@ def test_plain_checkpoint_loads_into_a_locon_model_as_a_no_op(tmp_path: Path, sa
     ("kwargs", "match"),
     [
         ({"encoder_locon_rank": 0}, "encoder_locon_rank must be >= 1"),
-        ({"encoder_locon_train_conv1": True}, "needs stage2.encoder_locon_rank"),
+        ({"encoder_unfreeze_first_conv": True}, "needs stage2.encoder_locon_rank"),
     ],
 )
 def test_config_validation(kwargs: dict, match: str):
@@ -177,10 +177,10 @@ def test_cli_flags(tmp_path: Path):
     config_path.write_text(json.dumps(make_config(tmp_path, stage2={"encoder_lr": 1e-4}).to_dict()))
     parser = cli.add_train_arguments(argparse.ArgumentParser())
     args = parser.parse_args([
-        "--config", str(config_path), "--stage2_encoder_locon_rank", "16", "--stage2_encoder_locon_train_conv1",
+        "--config", str(config_path), "--stage2_encoder_locon_rank", "16", "--stage2_encoder_unfreeze_first_conv",
     ])
     stage2 = cli.load_config(parser, args).stage2
-    assert stage2.encoder_locon_rank == 16 and stage2.encoder_locon_train_conv1
+    assert stage2.encoder_locon_rank == 16 and stage2.encoder_unfreeze_first_conv
 
 
 def test_two_stage_run_with_locon_keeps_base_weights(tmp_path: Path):
@@ -208,9 +208,9 @@ def _trainable(model: AlphaGenomeEncoderModel) -> set[str]:
 ADAPTERS = {f"blocks.{i}.conv.{w}" for i in (0, 1) for w in ("down", "up")}
 
 
-def test_train_conv1_adds_the_unwrapped_conv_in_full():
+def test_unfreeze_first_conv_trains_the_unwrapped_conv_in_full():
     model = _model()
-    model.add_encoder_locon(2, train_conv1=True)
+    model.add_encoder_locon(2, unfreeze_first_conv=True)
     assert _trainable(model) == ADAPTERS | {"conv1.weight", "conv1.bias"}
 
 
@@ -219,7 +219,7 @@ def test_two_stage_run_with_conv1_trains_it_and_checkpoint_restores_it(tmp_path:
     x = _x(12)
     loader = DataLoader(TensorDataset(x, x.sum(dim=(1, 2))), batch_size=4)
     stage = {"num_epochs": 1, "early_stopping_patience": 5, "head_lr": 1e-3, "lr_scheduler": "constant"}
-    stage2 = {**stage, "encoder_lr": 1e-2, "encoder_locon_rank": 2, "encoder_locon_train_conv1": True}
+    stage2 = {**stage, "encoder_lr": 1e-2, "encoder_locon_rank": 2, "encoder_unfreeze_first_conv": True}
     config = make_config(tmp_path, stage1=stage, stage2=stage2)
     kernel_before = model.encoder.blocks[0].conv.weight.detach().clone()
     scale_before = model.encoder.blocks[0].conv.scale.detach().clone()

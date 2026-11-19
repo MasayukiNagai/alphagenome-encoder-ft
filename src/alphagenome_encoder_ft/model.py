@@ -107,13 +107,13 @@ class AlphaGenomeEncoderModel(nn.Module):
             _ = self.predict_from_encoder(self.encode(dummy_sequence, dummy_organism_idx))
         self.input_length = int(sequence_length)
 
-    def add_encoder_locon(self, rank: int, *, train_conv1: bool = False) -> list[str]:
+    def add_encoder_locon(self, rank: int, *, unfreeze_first_conv: bool = False) -> list[str]:
         """Add rank-``rank`` LoCon adapters to the encoder's block convolutions and train only them.
 
         Every base encoder parameter is frozen; the new adapter weights are trainable. The rank
         is recorded so checkpoints can rebuild the adapters (``from_checkpoint``).
 
-        ``train_conv1`` also trains, in full, the convolutions left unwrapped (the DNA
+        ``unfreeze_first_conv`` also trains, in full, the convolutions left unwrapped (the DNA
         embedder's ``conv1``). It does not change what a checkpoint must rebuild.
         """
 
@@ -127,7 +127,7 @@ class AlphaGenomeEncoderModel(nn.Module):
             if isinstance(module, LoConConv1d):
                 module.up.requires_grad_(True)
                 module.down.requires_grad_(True)
-        if train_conv1:
+        if unfreeze_first_conv:
             wrapped_bases = {id(m.base) for m in self.encoder.modules() if isinstance(m, LoConConv1d)}
             for conv in self.encoder.modules():
                 if isinstance(conv, nn.Conv1d) and id(conv) not in wrapped_bases:

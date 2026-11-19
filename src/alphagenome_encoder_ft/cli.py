@@ -99,7 +99,7 @@ _SECTION_FLAGS: dict[str, list[tuple[str, dict[str, Any]]]] = {
         ("encoder_lr", {"type": float}),
         ("ema_decay", {"type": float}),
         ("encoder_locon_rank", {"type": int}),
-        ("encoder_locon_train_conv1", {"action": argparse.BooleanOptionalAction}),
+        ("encoder_unfreeze_first_conv", {"action": argparse.BooleanOptionalAction}),
     ],
     "checkpoint": [
         ("pretrained_weights", {"type": str}),
