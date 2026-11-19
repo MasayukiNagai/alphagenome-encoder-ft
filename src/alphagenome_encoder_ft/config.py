@@ -178,6 +178,10 @@ class Stage2Config(StageConfig):
 
     ``ema_decay``: keep an exponential moving average of the trainable weights (per optimizer
     step); validation, the scheduler, early stopping and ``best.pt`` use the averaged weights.
+    ``encoder_locon_rank``: freeze the encoder and train rank-r LoCon adapters on every block
+    convolution instead (``AlphaGenomeEncoderModel.add_encoder_locon``).
+    ``encoder_locon_train_conv1``: also train the DNA embedder's first convolution, which has
+    no adapter, in full. Needs ``encoder_locon_rank``.
     """
 
     SECTION: ClassVar[str] = "stage2"
@@ -185,6 +189,8 @@ class Stage2Config(StageConfig):
     head_lr: float = 1e-5
     encoder_lr: float = 1e-5
     ema_decay: float | None = None
+    encoder_locon_rank: int | None = None
+    encoder_locon_train_conv1: bool = False
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -192,6 +198,10 @@ class Stage2Config(StageConfig):
             raise ValueError("stage2.encoder_lr must be > 0")
         if self.ema_decay is not None and not 0 < self.ema_decay < 1:
             raise ValueError("stage2.ema_decay must be in (0, 1)")
+        if self.encoder_locon_rank is not None and self.encoder_locon_rank < 1:
+            raise ValueError("stage2.encoder_locon_rank must be >= 1")
+        if self.encoder_locon_rank is None and self.encoder_locon_train_conv1:
+            raise ValueError("stage2.encoder_locon_train_conv1 needs stage2.encoder_locon_rank")
 
 
 @dataclass

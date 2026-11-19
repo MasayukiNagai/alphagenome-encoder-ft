@@ -98,6 +98,8 @@ _SECTION_FLAGS: dict[str, list[tuple[str, dict[str, Any]]]] = {
         *_STAGE_FLAGS,
         ("encoder_lr", {"type": float}),
         ("ema_decay", {"type": float}),
+        ("encoder_locon_rank", {"type": int}),
+        ("encoder_locon_train_conv1", {"action": argparse.BooleanOptionalAction}),
     ],
     "checkpoint": [
         ("pretrained_weights", {"type": str}),

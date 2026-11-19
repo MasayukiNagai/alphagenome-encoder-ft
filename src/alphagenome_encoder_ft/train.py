@@ -391,6 +391,8 @@ def save_checkpoint(
         "construct": model.construct.to_dict() if model.construct is not None else None,
         "input_length": int(model.input_length),
     }
+    if getattr(model, "encoder_locon_rank", None) is not None:
+        payload["encoder_locon_rank"] = int(model.encoder_locon_rank)
     if config is not None:
         payload["config"] = config.to_dict()
 
@@ -411,15 +413,32 @@ def load_checkpoint(
     *,
     map_location: str | torch.device = "cpu",
 ) -> dict[str, Any]:
-    """Load a checkpoint into ``model``."""
+    """Load a checkpoint into ``model``.
+
+    A checkpoint saved without LoCon adapters (e.g. the stage-1 ``best.pt``) loads into a model
+    that has them: the base weights go into the wrapped convolutions and the adapters are reset
+    to a no-op, so the model computes what the saved one did.
+    """
+
+    from .adapters import locon_state_dict_from_plain
 
     checkpoint = torch.load(path, map_location=map_location, weights_only=False)
     save_mode = checkpoint["save_mode"]
+    plain_into_locon = (
+        getattr(model, "encoder_locon_rank", None) is not None and checkpoint.get("encoder_locon_rank") is None
+    )
 
     if save_mode == "minimal":
-        model.encoder.load_state_dict(checkpoint["encoder_state_dict"])
+        state = checkpoint["encoder_state_dict"]
+        if plain_into_locon:
+            state = locon_state_dict_from_plain(state, model.encoder)
+        model.encoder.load_state_dict(state)
     elif save_mode == "full":
-        model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        state = checkpoint["model_state_dict"]
+        if plain_into_locon:
+            prefix = next(f"{name}." for name, module in model.named_modules() if module is model.encoder)
+            state = locon_state_dict_from_plain(state, model.encoder, prefix=prefix)
+        model.load_state_dict(state, strict=False)
     elif save_mode != "head":
         raise ValueError(f"Unknown save_mode: {save_mode}")
 
@@ -765,7 +784,13 @@ def run_two_stage_training(
     best_stage1_path = stage1_result["best_checkpoint_path"] or str(stage1_dir / "best.pt")
     load_checkpoint(best_stage1_path, model)
 
-    model.set_encoder_trainable(True)
+    if config.stage2.encoder_locon_rank is not None:
+        model.add_encoder_locon(
+            config.stage2.encoder_locon_rank,
+            train_conv1=config.stage2.encoder_locon_train_conv1,
+        )
+    else:
+        model.set_encoder_trainable(True)
     stage2_optimizer = stage2_optimizer_factory(model)
     if stage2_scheduler_factory is not None:
         stage2_scheduler = stage2_scheduler_factory(stage2_optimizer)
