@@ -1,9 +1,12 @@
 #!/bin/bash
 # Two-stage lentiMPRA fine-tune. Needs a GPU.
 #
-#   bash scripts/run_train_lentimpra.sh [CELLTYPE] [extra flags...]
+#   INPUT_TSV=data/K562_with_chrom.tsv ALPHAGENOME_WEIGHTS=/path/to/model.safetensors \
+#     bash scripts/agarwal2025/run_train.sh agarwal2025_K562_locon_ema [flags for 1_train.py...]
 #
-# Any flag after the cell type is forwarded to train_lentimpra.py and overrides the config.
+# CONFIG is a path or the name of a file in configs/ (with or without .json). INPUT_TSV is the
+# table 0_add_coordinates.py writes. The run goes to CHECKPOINT_DIR (default:
+# results/<config name>). Flags after CONFIG override the config for this run.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,24 +18,20 @@ while [[ "$ROOT" != / && ! -f "$ROOT/pyproject.toml" ]]; do ROOT="$(dirname "$RO
 PY="${PYTHON:-$ROOT/.venv/bin/python}"
 [[ -x "$PY" ]] || { echo "no interpreter at $PY" >&2; exit 1; }
 
-CELLTYPE="${1:-K562}"
-[[ $# -gt 0 ]] && shift
-
-CONFIG="$ROOT/configs/lentimpra_${CELLTYPE}.json"
+[[ $# -ge 1 ]] || { echo "usage: $0 CONFIG [flags...]" >&2; exit 2; }
+CONFIG="$1"; shift
+[[ -f "$CONFIG" ]] || CONFIG="$ROOT/configs/${CONFIG%.json}.json"
 [[ -f "$CONFIG" ]] || { echo "no config: $CONFIG" >&2; exit 1; }
+NAME="$(basename "$CONFIG" .json)"
 
-INPUT_TSV="${LENTI_INPUT_TSV:-/grid/koo/home/shared/data/lentimpra/agarwal_2025/${CELLTYPE}.tsv}"
+INPUT_TSV="${INPUT_TSV:?set INPUT_TSV to <celltype>_with_chrom.tsv}"
 [[ -f "$INPUT_TSV" ]] || { echo "dataset not found: $INPUT_TSV" >&2; exit 1; }
-
 WEIGHTS="${ALPHAGENOME_WEIGHTS:?set ALPHAGENOME_WEIGHTS to the pretrained backbone}"
 [[ -f "$WEIGHTS" ]] || { echo "pretrained weights not found: $WEIGHTS" >&2; exit 1; }
 
-timestamp=$(date +"%m%d_%H%M")
-
-exec "$PY" "$ROOT/scripts/train_lentimpra.py" \
+exec "$PY" "$HERE/1_train.py" \
   --config "$CONFIG" \
   --input_tsv "$INPUT_TSV" \
   --pretrained_weights "$WEIGHTS" \
-  --wandb_name "mpra_${CELLTYPE}_${timestamp}" \
-  --checkpoint_dir "${CHECKPOINT_DIR:-$ROOT/results/mpra_${CELLTYPE}_${timestamp}}" \
+  --checkpoint_dir "${CHECKPOINT_DIR:-$ROOT/results/$NAME}" \
   "$@"

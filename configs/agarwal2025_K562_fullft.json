@@ -1,0 +1,79 @@
+{
+  "_comment": [
+    "lentiMPRA K562 (Agarwal et al. 2025), stage 2 = full fine-tuning of the encoder, no EMA.",
+    "One of four configs that differ only in stage 2 (fullft, fullft_ema, locon, locon_ema);",
+    "see docs/LoCon_EMA.md. Training hyperparameters only: the data file, the held-out",
+    "chromosomes and the construct come from scripts/agarwal2025/1_train.py."
+  ],
+  "data": {
+    "batch_size": 128,
+    "reverse_complement": true,
+    "rc_prob": 0.5,
+    "random_shift": true,
+    "shift_prob": 0.5,
+    "max_shift": 15,
+    "subset_frac": 1.0,
+    "num_workers": 4,
+    "pin_memory": true,
+    "drop_last": true
+  },
+  "head": {
+    "pooling_type": "flatten",
+    "center_bp": null,
+    "hidden_sizes": [1024],
+    "activation": "relu",
+    "norm_type": "layer",
+    "proj_dim": null,
+    "first_layer_rank": 128,
+    "head_type": "mpra",
+    "num_outputs": 1
+  },
+  "optim": {
+    "optimizer": "adamw",
+    "weight_decay": 1e-06,
+    "gradient_accumulation_steps": 1,
+    "gradient_clip": null
+  },
+  "stage1": {
+    "num_epochs": 100,
+    "early_stopping_patience": 8,
+    "val_evals_per_epoch": 4,
+    "head_lr": 3e-05,
+    "dropout": 0.5,
+    "lr_scheduler": "plateau",
+    "plateau_factor": 0.5,
+    "plateau_patience": 2,
+    "plateau_min_lr": 0.0,
+    "ema_decay": null
+  },
+  "stage2": {
+    "num_epochs": 50,
+    "early_stopping_patience": 8,
+    "val_evals_per_epoch": 4,
+    "head_lr": 1e-04,
+    "encoder_lr": 1e-04,
+    "dropout": 0.5,
+    "lr_scheduler": "plateau",
+    "plateau_factor": 0.5,
+    "plateau_patience": 1,
+    "plateau_min_lr": 0.0,
+    "ema_decay": null,
+    "encoder_locon_rank": null,
+    "encoder_unfreeze_first_conv": false
+  },
+  "checkpoint": {
+    "pretrained_weights": null,
+    "checkpoint_dir": "./results/agarwal2025_K562_fullft",
+    "save_mode": "minimal"
+  },
+  "logging": {
+    "use_wandb": false,
+    "wandb_project": "alphagenome-encoder-ft",
+    "wandb_name": "agarwal2025_K562_fullft"
+  },
+  "runtime": {
+    "device": null,
+    "use_amp": false,
+    "seed": 42
+  }
+}

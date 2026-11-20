@@ -43,33 +43,45 @@ model.initialize_head(input_length, device)   # materializes the lazily-shaped h
 
 ### Train and evaluate
 
-One driver per assay, because the dataset layout and the construct are assay-specific:
+Each published dataset has a folder under `scripts/` with its data preparation, reader, training and evaluation scripts, because the dataset layout and the construct are dataset-specific:
+
+| folder | dataset | steps |
+|---|---|---|
+| `scripts/agarwal2025/` | lentiMPRA, Agarwal et al. 2025 | `0_add_coordinates.py` (genomic coordinates for a chromosome split), `1_train.py`, `2_evaluate.py` |
+| `scripts/gosai2024/` | episomal MPRA, Gosai et al. 2024 | `0_prepare.py` (Supplementary Table S2 to a training TSV), `1_train.py`, `2_evaluate.py` |
+| `scripts/dealmeida2022/` | DeepSTARR, de Almeida et al. 2022 | `1_train.py`, `2_evaluate.py` |
 
 ```bash
-python scripts/train_lentimpra.py \
-  --config configs/lentimpra_K562.json \
-  --input_tsv /path/to/K562.tsv \
-  --pretrained_weights /path/to/alphagenome.safetensors
+python scripts/agarwal2025/1_train.py \
+  --config configs/agarwal2025_K562_locon_ema.json \
+  --input_tsv data/K562_with_chrom.tsv \
+  --pretrained_weights /path/to/alphagenome.safetensors \
+  --checkpoint_dir results/agarwal2025_K562_locon_ema
 
-python scripts/evaluate_lentimpra.py --checkpoint_path results/mpra_K562/stage2/best.pt
+python scripts/agarwal2025/2_evaluate.py --split test \
+  --checkpoint_path results/agarwal2025_K562_locon_ema/stage2/best.pt
 ```
 
-`scripts/run_train_lentimpra.sh CELLTYPE` and `scripts/run_evaluate_lentimpra.sh RUN_DIR` wrap those two with the shared paths; both forward extra flags to the Python script. Config files hold training hyperparameters only, and every field has a matching command-line flag that overrides it.
+`run_train.sh CONFIG` and `run_evaluate.sh RUN_DIR` in each folder wrap those two (the data and weights paths come from `INPUT_TSV` and `ALPHAGENOME_WEIGHTS`); both forward extra flags to the Python script. The lentiMPRA and Gosai evaluators average forward and reverse-complement predictions unless `--forward_only` is passed, and score `--split val` or `test`.
 
-Training runs in two stages: stage 1 trains the head with the encoder frozen, and stage 2 unfreezes the encoder and continues from the best stage-1 checkpoint. See [configs/lentimpra_K562.json](configs/lentimpra_K562.json) for the available settings. `--stage1_only` skips stage 2, and the test split is scored only with `--evaluate_test` or by the evaluate script.
+Config files in `configs/` hold training hyperparameters only, and every field has a matching command-line flag that overrides it. They are named `<dataset>_<cell type>_<stage-2 setting>.json`; for lentiMPRA and Gosai K562 there are four, differing only in stage 2: `fullft` (full fine-tuning), `fullft_ema`, `locon` and `locon_ema` (rank-128 LoCon adapters). `docs/LoCon_EMA.md` compares them and gives the commands that reproduce the comparison.
+
+Training runs in two stages: stage 1 trains the head with the encoder frozen, and stage 2 unfreezes the encoder and continues from the best stage-1 checkpoint. `--stage1_only` skips stage 2, `--resume_from_stage2` starts stage 2 from an existing `stage1/best.pt`, and the test split is scored only with `--evaluate_test` or by the evaluate script.
 
 A run directory:
 
 ```text
-results/mpra_K562/
+results/agarwal2025_K562_locon_ema/
 ├── config.json          # the resolved TrainConfig
-├── run.json             # construct, input length, input TSV
+├── run.json             # construct, input length, input TSV, held-out chromosomes
 ├── history.json
 ├── stage1/best.pt
 └── stage2/
     ├── best.pt
-    └── best_test_eval/  # test_metrics.json, test_predictions.csv, y_vs_y_pred.png
+    └── evaluation/      # <split>_metrics.json, <split>_predictions.csv, <split>_y_vs_y_pred.png
 ```
+
+`scripts/summarize_runs.py RUNS_DIR` averages scored `<name>-s<seed>` runs over seeds into one table.
 
 Two dataset readers ship with the package, `LentiMPRAAgarwal2025Dataset` and `DeepSTARRDeAlmeida2022Dataset`, each parsing one published table. Any other data source subclasses `MPRADataset` or uses it directly — it takes inserts and targets in memory and owns the construct and the augmentation:
 
@@ -190,12 +202,14 @@ src/alphagenome_encoder_ft/
 ├── metrics.py    # Pearson, Spearman, the evaluation summary
 ├── config.py     # TrainConfig and friends
 └── cli.py        # argparse/config/run-directory scaffolding for the scripts
-configs/          # per-cell-type training hyperparameters
+configs/          # training hyperparameters, <dataset>_<cell type>_<stage-2 setting>.json
+docs/             # LoCon_EMA.md: the stage-2 options compared on two libraries
 scripts/
-├── train_lentimpra.py / evaluate_lentimpra.py
-├── run_train_lentimpra.sh / run_evaluate_lentimpra.sh
-├── train_deepstarr.py / evaluate_deepstarr.py
-└── convert_checkpoint_v0.py   # pre-Construct checkpoints -> the current format
+├── agarwal2025/  # lentiMPRA: coordinates, chromosome-split reader, train, evaluate, reproduce
+├── gosai2024/    # episomal MPRA: prepare, construct, reader, train, evaluate, reproduce
+├── dealmeida2022/  # DeepSTARR: train, evaluate
+├── summarize_runs.py         # seed-averaged table of scored runs
+└── convert_checkpoint_v0.py  # pre-Construct checkpoints -> the current format
 ```
 
 `cli.py` holds the scaffolding — argparse, config files, run-directory layout, wandb — so a new assay's script is short, and it is installed so scripts outside this repository can use it too. Nothing in it is needed to use the package as a library: `train.py` takes a model and data loaders you built and knows nothing about config files or run directories.
