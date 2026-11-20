@@ -53,7 +53,7 @@ Each published dataset has a folder under `scripts/` with its data preparation, 
 
 ```bash
 python scripts/agarwal2025/1_train.py \
-  --config configs/agarwal2025_K562_locon_ema.json \
+  --config configs/agarwal2025_locon_ema.json \
   --input_tsv data/K562_with_chrom.tsv \
   --pretrained_weights /path/to/alphagenome.safetensors \
   --checkpoint_dir results/agarwal2025_K562_locon_ema
@@ -64,7 +64,7 @@ python scripts/agarwal2025/2_evaluate.py --split test \
 
 `run_train.sh CONFIG` and `run_evaluate.sh RUN_DIR` in each folder wrap those two (the data and weights paths come from `INPUT_TSV` and `ALPHAGENOME_WEIGHTS`); both forward extra flags to the Python script. The lentiMPRA and Gosai evaluators average forward and reverse-complement predictions unless `--forward_only` is passed, and score `--split val` or `test`.
 
-Config files in `configs/` hold training hyperparameters only, and every field has a matching command-line flag that overrides it. They are named `<dataset>_<cell type>_<stage-2 setting>.json`; for lentiMPRA and Gosai K562 there are four, differing only in stage 2: `fullft` (full fine-tuning), `fullft_ema`, `locon` and `locon_ema` (rank-128 LoCon adapters). `docs/LoCon_EMA.md` compares them and gives the commands that reproduce the comparison.
+Config files in `configs/` hold training hyperparameters only, and every field has a matching command-line flag that overrides it. They are named `<dataset>_<stage-2 setting>.json` and serve every cell type of that dataset (the data file decides the cell type); lentiMPRA and Gosai have four each, differing only in stage 2: `fullft` (full fine-tuning), `fullft_ema`, `locon` and `locon_ema` (rank-128 LoCon adapters). Their values were tuned on K562. `docs/LoCon_EMA.md` compares them and gives the commands that reproduce the comparison.
 
 Training runs in two stages: stage 1 trains the head with the encoder frozen, and stage 2 unfreezes the encoder and continues from the best stage-1 checkpoint. `--stage1_only` skips stage 2, `--resume_from_stage2` starts stage 2 from an existing `stage1/best.pt`, and the test split is scored only with `--evaluate_test` or by the evaluate script.
 
@@ -202,7 +202,7 @@ src/alphagenome_encoder_ft/
 ├── metrics.py    # Pearson, Spearman, the evaluation summary
 ├── config.py     # TrainConfig and friends
 └── cli.py        # argparse/config/run-directory scaffolding for the scripts
-configs/          # training hyperparameters, <dataset>_<cell type>_<stage-2 setting>.json
+configs/          # training hyperparameters, <dataset>_<stage-2 setting>.json
 docs/             # LoCon_EMA.md: the stage-2 options compared on two libraries
 scripts/
 ├── agarwal2025/  # lentiMPRA: coordinates, chromosome-split reader, train, evaluate, reproduce

@@ -1,19 +1,20 @@
 #!/bin/bash
-# One seed of the stage-2 comparison in docs/LoCon_EMA.md on lentiMPRA K562. Needs a GPU.
+# One seed of the stage-2 comparison in docs/LoCon_EMA.md on lentiMPRA. Needs a GPU.
 #
-#   INPUT_TSV=data/K562_with_chrom.tsv ALPHAGENOME_WEIGHTS=/path/to/model.safetensors \
+#   INPUT_TSV=data/K562_with_chrom.tsv OUT_DIR=results/agarwal2025_K562_locon_ema \
+#   ALPHAGENOME_WEIGHTS=/path/to/model.safetensors \
 #     bash scripts/agarwal2025/reproduce_locon_ema.sh 42
 #
+# INPUT_TSV is one cell type's table (K562, HepG2 or WTC11); the configs are the same for all.
 # Trains stage 1 once, then runs stage 2 four times from that same checkpoint, one per config
-# (configs/agarwal2025_K562_{fullft,fullft_ema,locon,locon_ema}.json; their stage 1 sections
-# are identical), and scores every stage on validation and test, strand-averaged:
+# (configs/agarwal2025_{fullft,fullft_ema,locon,locon_ema}.json; their stage 1 sections are
+# identical), and scores every stage on validation and test, strand-averaged:
 #
 #   OUT_DIR/stage1-s<seed>/            stage 1, scored in stage1/evaluation/
 #   OUT_DIR/<setting>-s<seed>/         stage 2 of one setting; stage1 -> the shared stage 1
 #
-# OUT_DIR defaults to results/agarwal2025_K562_locon_ema_reproduce. A finished step is skipped
-# and an interrupted one restarts, so rerunning the same seed resumes it. The doc used seeds
-# 42, 43 and 44; summarize with
+# A finished step is skipped and an interrupted one restarts, so rerunning the same seed
+# resumes it. The doc used seeds 42, 43 and 44; summarize with
 #
 #   python scripts/summarize_runs.py OUT_DIR
 set -euo pipefail
@@ -35,8 +36,8 @@ INPUT_TSV="${INPUT_TSV:?set INPUT_TSV to <celltype>_with_chrom.tsv}"
 WEIGHTS="${ALPHAGENOME_WEIGHTS:?set ALPHAGENOME_WEIGHTS to the pretrained backbone}"
 [[ -f "$WEIGHTS" ]] || { echo "pretrained weights not found: $WEIGHTS" >&2; exit 1; }
 
-PREFIX="agarwal2025_K562"
-OUT_DIR="${OUT_DIR:-$ROOT/results/${PREFIX}_locon_ema_reproduce}"
+OUT_DIR="${OUT_DIR:?set OUT_DIR to the directory for the runs on this data file}"
+PREFIX="agarwal2025"
 STAGE1_RUN="$OUT_DIR/stage1-s$SEED"
 
 train() {  # train <config name> <run dir> [flags...]

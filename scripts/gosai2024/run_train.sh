@@ -2,7 +2,8 @@
 # Two-stage Gosai 2024 episomal MPRA fine-tune. Needs a GPU.
 #
 #   INPUT_TSV=data/gosai_K562_inserts.tsv ALPHAGENOME_WEIGHTS=/path/to/model.safetensors \
-#     bash scripts/gosai2024/run_train.sh gosai2024_K562_locon_ema [flags for 1_train.py...]
+#   CHECKPOINT_DIR=results/gosai2024_K562_locon_ema \
+#     bash scripts/gosai2024/run_train.sh gosai2024_locon_ema [flags for 1_train.py...]
 #
 # CONFIG is a path or the name of a file in configs/ (with or without .json). INPUT_TSV is the
 # table 0_prepare.py writes. The run goes to CHECKPOINT_DIR (default:

@@ -1,19 +1,20 @@
 #!/bin/bash
-# One seed of the stage-2 comparison in docs/LoCon_EMA.md on Gosai 2024 K562. Needs a GPU.
+# One seed of the stage-2 comparison in docs/LoCon_EMA.md on Gosai 2024. Needs a GPU.
 #
-#   INPUT_TSV=data/gosai_K562_inserts.tsv ALPHAGENOME_WEIGHTS=/path/to/model.safetensors \
+#   INPUT_TSV=data/gosai_K562_inserts.tsv OUT_DIR=results/gosai2024_K562_locon_ema \
+#   ALPHAGENOME_WEIGHTS=/path/to/model.safetensors \
 #     bash scripts/gosai2024/reproduce_locon_ema.sh 42
 #
-# Trains stage 1 once, then runs stage 2 four times from that same checkpoint, one per config
-# (configs/gosai2024_K562_{fullft,fullft_ema,locon,locon_ema}.json; their stage 1 sections
+# INPUT_TSV is the table 0_prepare.py writes for one cell type; the configs are the same for
+# all. Trains stage 1 once, then runs stage 2 four times from that same checkpoint, one per
+# config (configs/gosai2024_{fullft,fullft_ema,locon,locon_ema}.json; their stage 1 sections
 # are identical), and scores every stage on validation and test, strand-averaged:
 #
 #   OUT_DIR/stage1-s<seed>/            stage 1, scored in stage1/evaluation/
 #   OUT_DIR/<setting>-s<seed>/         stage 2 of one setting; stage1 -> the shared stage 1
 #
-# OUT_DIR defaults to results/gosai2024_K562_locon_ema_reproduce. A finished step is skipped
-# and an interrupted one restarts, so rerunning the same seed resumes it. The doc used seeds
-# 42, 43 and 44; summarize with
+# A finished step is skipped and an interrupted one restarts, so rerunning the same seed
+# resumes it. The doc used seeds 42, 43 and 44; summarize with
 #
 #   python scripts/summarize_runs.py OUT_DIR
 set -euo pipefail
@@ -35,8 +36,8 @@ INPUT_TSV="${INPUT_TSV:?set INPUT_TSV to the TSV 0_prepare.py writes}"
 WEIGHTS="${ALPHAGENOME_WEIGHTS:?set ALPHAGENOME_WEIGHTS to the pretrained backbone}"
 [[ -f "$WEIGHTS" ]] || { echo "pretrained weights not found: $WEIGHTS" >&2; exit 1; }
 
-PREFIX="gosai2024_K562"
-OUT_DIR="${OUT_DIR:-$ROOT/results/${PREFIX}_locon_ema_reproduce}"
+OUT_DIR="${OUT_DIR:?set OUT_DIR to the directory for the runs on this data file}"
+PREFIX="gosai2024"
 STAGE1_RUN="$OUT_DIR/stage1-s$SEED"
 
 train() {  # train <config name> <run dir> [flags...]

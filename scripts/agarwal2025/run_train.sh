@@ -2,7 +2,8 @@
 # Two-stage lentiMPRA fine-tune. Needs a GPU.
 #
 #   INPUT_TSV=data/K562_with_chrom.tsv ALPHAGENOME_WEIGHTS=/path/to/model.safetensors \
-#     bash scripts/agarwal2025/run_train.sh agarwal2025_K562_locon_ema [flags for 1_train.py...]
+#   CHECKPOINT_DIR=results/agarwal2025_K562_locon_ema \
+#     bash scripts/agarwal2025/run_train.sh agarwal2025_locon_ema [flags for 1_train.py...]
 #
 # CONFIG is a path or the name of a file in configs/ (with or without .json). INPUT_TSV is the
 # table 0_add_coordinates.py writes. The run goes to CHECKPOINT_DIR (default:

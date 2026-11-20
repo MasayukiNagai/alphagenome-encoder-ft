@@ -8,7 +8,7 @@ reported prediction (strand-averaged unless the run was scored ``--forward_only`
 ``forward`` is the forward strand alone. A stage directory that is a symlink belongs to
 another run and is skipped.
 
-    python scripts/summarize_runs.py results/agarwal2025_K562_locon_ema_reproduce
+    python scripts/summarize_runs.py results/agarwal2025_K562_locon_ema
 """
 
 from __future__ import annotations
@@ -64,6 +64,8 @@ def cell(values: list[float]) -> str:
 
 def main() -> None:
     args = build_arg_parser().parse_args()
+    if not args.runs_dir.is_dir():
+        raise SystemExit(f"not a directory: {args.runs_dir}")
     table = collect(args.runs_dir)
     if not table:
         raise SystemExit(f"no scored runs under {args.runs_dir}")

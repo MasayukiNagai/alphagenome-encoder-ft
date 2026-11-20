@@ -1,6 +1,7 @@
 {
   "_comment": [
-    "Episomal MPRA K562 (Gosai et al. 2024), stage 2 = full fine-tuning of the encoder, no EMA.",
+    "Episomal MPRA (Gosai et al. 2024), stage 2 = rank-128 LoCon adapters + weight EMA.",
+    "Tuned on K562; the cell type is the data file's (0_prepare.py --cell_type).",
     "One of four configs that differ only in stage 2 (fullft, fullft_ema, locon, locon_ema);",
     "see docs/LoCon_EMA.md. Training hyperparameters only: the data file, the held-out",
     "chromosomes and the construct come from scripts/gosai2024/1_train.py."
@@ -57,19 +58,19 @@
     "plateau_factor": 0.5,
     "plateau_patience": 1,
     "plateau_min_lr": 0.0,
-    "ema_decay": null,
-    "encoder_locon_rank": null,
+    "ema_decay": 0.9995,
+    "encoder_locon_rank": 128,
     "encoder_unfreeze_first_conv": false
   },
   "checkpoint": {
     "pretrained_weights": null,
-    "checkpoint_dir": "./results/gosai2024_K562_fullft",
+    "checkpoint_dir": "./results/gosai2024_locon_ema",
     "save_mode": "minimal"
   },
   "logging": {
     "use_wandb": false,
     "wandb_project": "alphagenome-encoder-ft",
-    "wandb_name": "gosai2024_K562_fullft"
+    "wandb_name": "gosai2024_locon_ema"
   },
   "runtime": {
     "device": null,

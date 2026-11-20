@@ -1,6 +1,7 @@
 {
   "_comment": [
-    "lentiMPRA K562 (Agarwal et al. 2025), stage 2 = rank-128 LoCon adapters, no EMA.",
+    "lentiMPRA (Agarwal et al. 2025), stage 2 = rank-128 LoCon adapters, no EMA.",
+    "Tuned on K562; the cell type is the data file's, so the same config serves all three.",
     "One of four configs that differ only in stage 2 (fullft, fullft_ema, locon, locon_ema);",
     "see docs/LoCon_EMA.md. Training hyperparameters only: the data file, the held-out",
     "chromosomes and the construct come from scripts/agarwal2025/1_train.py."
@@ -63,13 +64,13 @@
   },
   "checkpoint": {
     "pretrained_weights": null,
-    "checkpoint_dir": "./results/agarwal2025_K562_locon",
+    "checkpoint_dir": "./results/agarwal2025_locon",
     "save_mode": "minimal"
   },
   "logging": {
     "use_wandb": false,
     "wandb_project": "alphagenome-encoder-ft",
-    "wandb_name": "agarwal2025_K562_locon"
+    "wandb_name": "agarwal2025_locon"
   },
   "runtime": {
     "device": null,

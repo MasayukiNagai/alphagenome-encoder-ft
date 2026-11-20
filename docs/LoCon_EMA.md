@@ -64,10 +64,11 @@ lentiMPRA, from `datasets/original/K562.tsv` of https://github.com/autosome-ru/h
 python scripts/agarwal2025/0_add_coordinates.py --celltype K562 \
     --input_tsv data/K562.tsv --output data/K562_with_chrom.tsv
 for seed in 42 43 44; do
-  INPUT_TSV=data/K562_with_chrom.tsv ALPHAGENOME_WEIGHTS=/path/to/model.safetensors \
+  INPUT_TSV=data/K562_with_chrom.tsv OUT_DIR=results/agarwal2025_K562_locon_ema \
+  ALPHAGENOME_WEIGHTS=/path/to/model.safetensors \
     bash scripts/agarwal2025/reproduce_locon_ema.sh "$seed"
 done
-python scripts/summarize_runs.py results/agarwal2025_K562_locon_ema_reproduce
+python scripts/summarize_runs.py results/agarwal2025_K562_locon_ema
 ```
 
 Gosai, from Supplementary Table S2 of Gosai et al. 2024:
@@ -75,10 +76,11 @@ Gosai, from Supplementary Table S2 of Gosai et al. 2024:
 ```bash
 bash scripts/gosai2024/run_prepare.sh DATA-Table_S2__MPRA_dataset.txt data/gosai_K562_inserts.tsv
 for seed in 42 43 44; do
-  INPUT_TSV=data/gosai_K562_inserts.tsv ALPHAGENOME_WEIGHTS=/path/to/model.safetensors \
+  INPUT_TSV=data/gosai_K562_inserts.tsv OUT_DIR=results/gosai2024_K562_locon_ema \
+  ALPHAGENOME_WEIGHTS=/path/to/model.safetensors \
     bash scripts/gosai2024/reproduce_locon_ema.sh "$seed"
 done
-python scripts/summarize_runs.py results/gosai2024_K562_locon_ema_reproduce
+python scripts/summarize_runs.py results/gosai2024_K562_locon_ema
 ```
 
 On one H100, a seed takes roughly 1.5 hours on lentiMPRA and 6 hours on Gosai. The seeds are independent and can run in parallel.
