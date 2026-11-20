@@ -26,7 +26,7 @@ train = [
 
 [package.metadata]
 requires-dist = [
-    { name = "alphagenome-pytorch", git = "https://github.com/genomicsxai/alphagenome-pytorch.git?rev=72268c011d37cf2d387506493614952d85abe21b" },
+    { name = "alphagenome-pytorch", git = "https://github.com/genomicsxai/alphagenome-pytorch.git" },
     { name = "numpy" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "torch" },
@@ -43,7 +43,7 @@ train = [
 [[package]]
 name = "alphagenome-pytorch"
 version = "0.3.2.dev75+g72268c011.d20261108"
-source = { git = "https://github.com/genomicsxai/alphagenome-pytorch.git?rev=72268c011d37cf2d387506493614952d85abe21b#72268c011d37cf2d387506493614952d85abe21b" }
+source = { git = "https://github.com/genomicsxai/alphagenome-pytorch.git#72268c011d37cf2d387506493614952d85abe21b" }
 dependencies = [
     { name = "numpy" },
     { name = "safetensors" },
