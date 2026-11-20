@@ -160,6 +160,22 @@ def test_plain_checkpoint_loads_into_a_locon_model_as_a_no_op(tmp_path: Path, sa
     assert all(m.up.abs().sum() == 0 for m in model.encoder.modules() if isinstance(m, LoConConv1d))
 
 
+@pytest.mark.parametrize("save_mode", ["minimal", "full"])
+@pytest.mark.parametrize(("model_rank", "message"), [(None, "model has none"), (3, "model has rank 3")])
+def test_locon_checkpoint_needs_a_model_with_the_same_rank(
+    tmp_path: Path, save_mode: str, model_rank: int | None, message: str
+):
+    # "full" loads non-strictly, so without this check the encoder keys would be skipped silently.
+    model = _model()
+    model.add_encoder_locon(2)
+    path = save_checkpoint(tmp_path / "locon.pt", model, save_mode=save_mode, config=make_config(tmp_path))
+    other = _model()
+    if model_rank is not None:
+        other.add_encoder_locon(model_rank)
+    with pytest.raises(ValueError, match=message):
+        load_checkpoint(path, other)
+
+
 @pytest.mark.parametrize(
     ("kwargs", "match"),
     [
@@ -181,6 +197,25 @@ def test_cli_flags(tmp_path: Path):
     ])
     stage2 = cli.load_config(parser, args).stage2
     assert stage2.encoder_locon_rank == 16 and stage2.encoder_unfreeze_first_conv
+
+
+def test_cli_none_unsets_a_config_value(tmp_path: Path):
+    config = make_config(tmp_path, stage2={"encoder_lr": 1e-4, "encoder_locon_rank": 16, "ema_decay": 0.999})
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(config.to_dict()))
+    parser = cli.add_train_arguments(argparse.ArgumentParser())
+
+    kept = cli.load_config(parser, parser.parse_args(["--config", str(config_path)])).stage2
+    assert kept.encoder_locon_rank == 16 and kept.ema_decay == 0.999
+
+    args = parser.parse_args([
+        "--config", str(config_path), "--stage2_encoder_locon_rank", "none", "--stage2_ema_decay", "None",
+    ])
+    unset = cli.load_config(parser, args).stage2
+    assert unset.encoder_locon_rank is None and unset.ema_decay is None
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--stage2_encoder_locon_rank", "nan"])
 
 
 def test_two_stage_run_with_locon_keeps_base_weights(tmp_path: Path):

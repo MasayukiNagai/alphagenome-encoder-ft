@@ -63,9 +63,11 @@ class ParameterEMA:
     """Exponential moving average of a model's trainable parameters.
 
     ``update`` after each optimizer step; ``applied()`` swaps the averages in for the duration
-    of a ``with`` block (validation, checkpointing) and restores the live weights after. The
-    decay warms up as ``min(decay, (1 + n) / (10 + n))`` over the first updates, so early
-    averages are not dominated by the starting weights.
+    of a ``with`` block (validation, checkpointing) and restores the live weights after. After
+    ``n`` updates the decay is ``min(decay, (1 + n) / (10 + n))``, so early averages are not
+    dominated by the starting weights; ``decay`` itself applies only after about
+    ``9 / (1 - decay)`` updates (18,000 for 0.9995), and runs shorter than that average over
+    roughly the last ``n / 9`` steps whatever ``decay`` is.
     """
 
     def __init__(self, model: torch.nn.Module, decay: float) -> None:
@@ -417,16 +419,25 @@ def load_checkpoint(
 
     A checkpoint saved without LoCon adapters (e.g. the stage-1 ``best.pt``) loads into a model
     that has them: the base weights go into the wrapped convolutions and the adapters are reset
-    to a no-op, so the model computes what the saved one did.
+    to a no-op, so the model computes what the saved one did. A checkpoint saved with adapters
+    needs a model with adapters of the same rank (``AlphaGenomeEncoderModel.from_checkpoint``
+    builds one).
     """
 
     from .adapters import locon_state_dict_from_plain
 
     checkpoint = torch.load(path, map_location=map_location, weights_only=False)
     save_mode = checkpoint["save_mode"]
-    plain_into_locon = (
-        getattr(model, "encoder_locon_rank", None) is not None and checkpoint.get("encoder_locon_rank") is None
-    )
+    model_rank = getattr(model, "encoder_locon_rank", None)
+    checkpoint_rank = checkpoint.get("encoder_locon_rank")
+    if checkpoint_rank is not None and checkpoint_rank != model_rank:
+        raise ValueError(
+            f"{path} has rank-{checkpoint_rank} LoCon adapters but the model has "
+            f"{'none' if model_rank is None else f'rank {model_rank}'}; call "
+            f"model.add_encoder_locon({checkpoint_rank}) first, or use "
+            "AlphaGenomeEncoderModel.from_checkpoint"
+        )
+    plain_into_locon = model_rank is not None and checkpoint_rank is None
 
     if save_mode == "minimal":
         state = checkpoint["encoder_state_dict"]

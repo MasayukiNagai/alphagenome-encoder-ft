@@ -31,10 +31,10 @@ def _ensure_mapping(value: Any, *, section: str) -> Mapping[str, Any]:
 
 
 def _deep_merge(base: dict[str, Any], overrides: Mapping[str, Any]) -> dict[str, Any]:
+    """``base`` with ``overrides`` applied; a ``None`` value sets the field to ``None``."""
+
     merged = copy.deepcopy(base)
     for key, value in overrides.items():
-        if value is None:
-            continue
         if isinstance(value, Mapping) and isinstance(merged.get(key), dict):
             merged[key] = _deep_merge(merged[key], value)
         else:
@@ -139,7 +139,9 @@ class StageConfig:
     ``ema_decay``: keep an exponential moving average of every weight the stage trains (in
     stage 1 the head; in stage 2 also the encoder or its LoCon adapters), updated per
     optimizer step; validation, the scheduler, early stopping and ``best.pt`` use the
-    averaged weights. ``None`` turns it off.
+    averaged weights. ``None`` turns it off. The decay warms up and reaches ``ema_decay`` only
+    after about ``9 / (1 - ema_decay)`` optimizer steps (``train.ParameterEMA``), so the
+    same value averages over a different span when the dataset or batch size changes.
     """
 
     SECTION: ClassVar[str] = "stage1"
