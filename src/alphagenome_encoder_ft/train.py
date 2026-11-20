@@ -9,9 +9,9 @@ objects, and laying out a run directory around them, is :mod:`alphagenome_encode
 from __future__ import annotations
 
 import math
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import torch
 import torch.nn.functional as F
@@ -59,6 +59,46 @@ def _default_loss_fn(preds: Tensor, targets: Tensor) -> Tensor:
     return F.mse_loss(preds.float(), targets.float())
 
 
+class ParameterEMA:
+    """Exponential moving average of a model's trainable parameters.
+
+    ``update`` after each optimizer step; ``applied()`` swaps the averages in for the duration
+    of a ``with`` block (validation, checkpointing) and restores the live weights after. After
+    ``n`` updates the decay is ``min(decay, (1 + n) / (10 + n))``, so early averages are not
+    dominated by the starting weights; ``decay`` itself applies only after about
+    ``9 / (1 - decay)`` updates, and runs shorter than that average over roughly the last
+    ``n / 9`` steps whatever ``decay`` is.
+    """
+
+    def __init__(self, model: torch.nn.Module, decay: float) -> None:
+        if not 0 < decay < 1:
+            raise ValueError("decay must be in (0, 1)")
+        self.decay = decay
+        self.num_updates = 0
+        self.params = {name: p for name, p in model.named_parameters() if p.requires_grad}
+        self.shadow = {name: p.detach().clone() for name, p in self.params.items()}
+
+    @torch.no_grad()
+    def update(self) -> None:
+        self.num_updates += 1
+        decay = min(self.decay, (1 + self.num_updates) / (10 + self.num_updates))
+        for name, param in self.params.items():
+            self.shadow[name].mul_(decay).add_(param.detach(), alpha=1 - decay)
+
+    @contextmanager
+    def applied(self) -> Iterator[None]:
+        live = {name: p.detach().clone() for name, p in self.params.items()}
+        with torch.no_grad():
+            for name, param in self.params.items():
+                param.copy_(self.shadow[name])
+        try:
+            yield
+        finally:
+            with torch.no_grad():
+                for name, param in self.params.items():
+                    param.copy_(live[name])
+
+
 def _compute_metrics(
     preds: Tensor,
     targets: Tensor,
@@ -72,7 +112,7 @@ def _compute_metrics(
             value = value.detach().float().cpu().item()
         metrics[name] = float(value)
 
-    # multi-output heads (e.g. DeepSTARR dev+hk): also report per-track pearson.
+    # multi-output heads: also report per-track pearson.
     for idx, score in enumerate(per_track(pearsonr, preds, targets)):
         metrics[f"pearson_track{idx}"] = score
     return metrics
@@ -209,8 +249,9 @@ def train_epoch(
     grad_clip: float | None = None,
     show_progress: bool = False,
     batch_end_callback: Callable[[int, int], bool] | None = None,
+    ema: ParameterEMA | None = None,
 ) -> dict[str, float]:
-    """Train for one epoch."""
+    """Train for one epoch. ``ema`` is updated after every optimizer step."""
 
     device = torch.device(device)
     loss_fn = loss_fn or _default_loss_fn
@@ -261,6 +302,8 @@ def train_epoch(
                     torch.nn.utils.clip_grad_norm_(model.encoder.parameters(), grad_clip)
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
+            if ema is not None:
+                ema.update()
 
         batch_size = targets.shape[0]
         total_samples += batch_size
@@ -350,6 +393,8 @@ def save_checkpoint(
         "construct": model.construct.to_dict() if model.construct is not None else None,
         "input_length": int(model.input_length),
     }
+    if getattr(model, "encoder_locon_rank", None) is not None:
+        payload["encoder_locon_rank"] = int(model.encoder_locon_rank)
     if config is not None:
         payload["config"] = config.to_dict()
 
@@ -370,15 +415,41 @@ def load_checkpoint(
     *,
     map_location: str | torch.device = "cpu",
 ) -> dict[str, Any]:
-    """Load a checkpoint into ``model``."""
+    """Load a checkpoint into ``model``.
+
+    A checkpoint saved without LoCon adapters (e.g. the stage-1 ``best.pt``) loads into a model
+    that has them: the base weights go into the wrapped convolutions and the adapters are reset
+    to a no-op, so the model computes what the saved one did. A checkpoint saved with adapters
+    needs a model with adapters of the same rank (``AlphaGenomeEncoderModel.from_checkpoint``
+    builds one).
+    """
+
+    from .adapters import locon_state_dict_from_plain
 
     checkpoint = torch.load(path, map_location=map_location, weights_only=False)
     save_mode = checkpoint["save_mode"]
+    model_rank = getattr(model, "encoder_locon_rank", None)
+    checkpoint_rank = checkpoint.get("encoder_locon_rank")
+    if checkpoint_rank is not None and checkpoint_rank != model_rank:
+        raise ValueError(
+            f"{path} has rank-{checkpoint_rank} LoCon adapters but the model has "
+            f"{'none' if model_rank is None else f'rank {model_rank}'}; call "
+            f"model.add_encoder_locon({checkpoint_rank}) first, or use "
+            "AlphaGenomeEncoderModel.from_checkpoint"
+        )
+    plain_into_locon = model_rank is not None and checkpoint_rank is None
 
     if save_mode == "minimal":
-        model.encoder.load_state_dict(checkpoint["encoder_state_dict"])
+        state = checkpoint["encoder_state_dict"]
+        if plain_into_locon:
+            state = locon_state_dict_from_plain(state, model.encoder)
+        model.encoder.load_state_dict(state)
     elif save_mode == "full":
-        model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        state = checkpoint["model_state_dict"]
+        if plain_into_locon:
+            prefix = next(f"{name}." for name, module in model.named_modules() if module is model.encoder)
+            state = locon_state_dict_from_plain(state, model.encoder, prefix=prefix)
+        model.load_state_dict(state, strict=False)
     elif save_mode != "head":
         raise ValueError(f"Unknown save_mode: {save_mode}")
 
@@ -477,6 +548,10 @@ def run_training_stage(
     if stage_dir is not None:
         stage_dir.mkdir(parents=True, exist_ok=True)
 
+    ema_decay = stage_config.ema_decay
+    ema = ParameterEMA(model, ema_decay) if ema_decay is not None else None
+    averaged = ema.applied if ema is not None else nullcontext
+
     history = _history_template()
     best_monitor = math.inf
     best_epoch: float = float(start_epoch)
@@ -506,14 +581,15 @@ def run_training_stage(
             if val_loader is None or batch_idx not in val_eval_points:
                 return True
 
-            val_metrics = evaluate(
-                model,
-                val_loader,
-                device,
-                loss_fn=loss_fn,
-                metric_fns=metric_fns,
-                use_amp=config.runtime.use_amp,
-            )
+            with averaged():
+                val_metrics = evaluate(
+                    model,
+                    val_loader,
+                    device,
+                    loss_fn=loss_fn,
+                    metric_fns=metric_fns,
+                    use_amp=config.runtime.use_amp,
+                )
             # ``evaluate`` switches the module to eval mode; restore the active
             # training mode before continuing with the rest of the epoch.
             if train_encoder:
@@ -546,12 +622,13 @@ def run_training_stage(
                 best_val_metrics = dict(val_metrics)
                 evals_without_improvement = 0
                 if stage_dir is not None:
-                    best_checkpoint_path = save_checkpoint(
-                        stage_dir / "best.pt",
-                        model,
-                        save_mode=config.checkpoint.save_mode,
-                        config=config,
-                    )
+                    with averaged():
+                        best_checkpoint_path = save_checkpoint(
+                            stage_dir / "best.pt",
+                            model,
+                            save_mode=config.checkpoint.save_mode,
+                            config=config,
+                        )
             else:
                 evals_without_improvement += 1
 
@@ -577,6 +654,7 @@ def run_training_stage(
             grad_clip=config.optim.gradient_clip,
             show_progress=show_progress,
             batch_end_callback=_validate_if_needed if val_loader is not None else None,
+            ema=ema,
         )
         history["train_loss"].append(train_metrics["loss"])
         history["train_pearson"].append(train_metrics.get("pearson", float("nan")))
@@ -589,12 +667,13 @@ def run_training_stage(
                 best_epoch = float(epoch_number)
                 evals_without_improvement = 0
                 if stage_dir is not None:
-                    best_checkpoint_path = save_checkpoint(
-                        stage_dir / "best.pt",
-                        model,
-                        save_mode=config.checkpoint.save_mode,
-                        config=config,
-                    )
+                    with averaged():
+                        best_checkpoint_path = save_checkpoint(
+                            stage_dir / "best.pt",
+                            model,
+                            save_mode=config.checkpoint.save_mode,
+                            config=config,
+                        )
             else:
                 evals_without_improvement += 1
 
@@ -715,7 +794,13 @@ def run_two_stage_training(
     best_stage1_path = stage1_result["best_checkpoint_path"] or str(stage1_dir / "best.pt")
     load_checkpoint(best_stage1_path, model)
 
-    model.set_encoder_trainable(True)
+    if config.stage2.encoder_locon_rank is not None:
+        model.add_encoder_locon(
+            config.stage2.encoder_locon_rank,
+            unfreeze_first_conv=config.stage2.encoder_unfreeze_first_conv,
+        )
+    else:
+        model.set_encoder_trainable(True)
     stage2_optimizer = stage2_optimizer_factory(model)
     if stage2_scheduler_factory is not None:
         stage2_scheduler = stage2_scheduler_factory(stage2_optimizer)

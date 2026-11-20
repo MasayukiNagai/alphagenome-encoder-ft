@@ -31,10 +31,10 @@ def _ensure_mapping(value: Any, *, section: str) -> Mapping[str, Any]:
 
 
 def _deep_merge(base: dict[str, Any], overrides: Mapping[str, Any]) -> dict[str, Any]:
+    """``base`` with ``overrides`` applied; a ``None`` value sets the field to ``None``."""
+
     merged = copy.deepcopy(base)
     for key, value in overrides.items():
-        if value is None:
-            continue
         if isinstance(value, Mapping) and isinstance(merged.get(key), dict):
             merged[key] = _deep_merge(merged[key], value)
         else:
@@ -136,6 +136,12 @@ class StageConfig:
     training stops, or the plateau schedule multiplies the rate by ``plateau_factor``, once
     ``patience * val_evals_per_epoch`` passes in a row have not improved on the best
     validation loss. The plateau fields apply only when ``lr_scheduler`` is ``plateau``.
+    ``ema_decay``: keep an exponential moving average of every weight the stage trains (in
+    stage 1 the head; in stage 2 also the encoder or its LoCon adapters), updated per
+    optimizer step; validation, the scheduler, early stopping and ``best.pt`` use the
+    averaged weights. ``None`` turns it off. The decay warms up and reaches ``ema_decay`` only
+    after about ``9 / (1 - ema_decay)`` optimizer steps (``train.ParameterEMA``), so the
+    same value averages over a different span when the dataset or batch size changes.
     """
 
     SECTION: ClassVar[str] = "stage1"
@@ -149,6 +155,7 @@ class StageConfig:
     plateau_factor: float = 0.5
     plateau_patience: int = 2
     plateau_min_lr: float = 0.0
+    ema_decay: float | None = None
 
     def __post_init__(self) -> None:
         s = self.SECTION
@@ -170,21 +177,38 @@ class StageConfig:
             raise ValueError(f"{s}.plateau_patience must be >= 0")
         if self.plateau_min_lr < 0:
             raise ValueError(f"{s}.plateau_min_lr must be >= 0")
+        if self.ema_decay is not None and not 0 < self.ema_decay < 1:
+            raise ValueError(f"{s}.ema_decay must be in (0, 1)")
 
 
 @dataclass
 class Stage2Config(StageConfig):
-    """Stage 2: the encoder is unfrozen and trains at ``encoder_lr``, the head at ``head_lr``."""
+    """Stage 2: the encoder is unfrozen and trains at ``encoder_lr``, the head at ``head_lr``.
+
+    ``encoder_locon_rank``: freeze the encoder and train rank-r LoCon adapters on every block
+    convolution instead (``AlphaGenomeEncoderModel.add_encoder_locon``).
+    ``encoder_unfreeze_first_conv``: with LoCon, also train the encoder's first convolution
+    (the DNA embedder's ``conv1``, which has no adapter) in full. Needs ``encoder_locon_rank``.
+    """
 
     SECTION: ClassVar[str] = "stage2"
 
     head_lr: float = 1e-5
     encoder_lr: float = 1e-5
+    encoder_locon_rank: int | None = None
+    encoder_unfreeze_first_conv: bool = False
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.encoder_lr <= 0:
             raise ValueError("stage2.encoder_lr must be > 0")
+        if self.encoder_locon_rank is not None and self.encoder_locon_rank < 1:
+            raise ValueError("stage2.encoder_locon_rank must be >= 1")
+        if self.encoder_locon_rank is None and self.encoder_unfreeze_first_conv:
+            raise ValueError(
+                "stage2.encoder_unfreeze_first_conv needs stage2.encoder_locon_rank "
+                "(without LoCon the whole encoder trains)"
+            )
 
 
 @dataclass

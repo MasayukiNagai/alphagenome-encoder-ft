@@ -47,6 +47,19 @@ RUN_METADATA_FILENAME = "run.json"
 # CLI
 # ---------------------------------------------------------------------------
 
+# A flag left out keeps the config's value, so argparse's ``None`` means "not given". A field
+# that can be null takes the value ``none`` to set it to null (``--stage2_ema_decay none``).
+_NULL = object()
+
+
+def _nullable(cast: Callable[[str], Any]) -> dict[str, Any]:
+    def convert(value: str) -> Any:
+        return _NULL if value.lower() == "none" else cast(value)
+
+    convert.__name__ = cast.__name__  # argparse names the type in its error message
+    return {"type": convert, "help": f"{cast.__name__}, or none to unset"}
+
+
 _STAGE_FLAGS: list[tuple[str, dict[str, Any]]] = [
     ("num_epochs", {"type": int}),
     ("early_stopping_patience", {"type": int}),
@@ -57,6 +70,7 @@ _STAGE_FLAGS: list[tuple[str, dict[str, Any]]] = [
     ("plateau_factor", {"type": float}),
     ("plateau_patience", {"type": int}),
     ("plateau_min_lr", {"type": float}),
+    ("ema_decay", _nullable(float)),
 ]
 
 # Both stage sections have the same fields, so their flags carry the section name:
@@ -78,10 +92,10 @@ _SECTION_FLAGS: dict[str, list[tuple[str, dict[str, Any]]]] = {
     ],
     "head": [
         ("pooling_type", {"type": str, "choices": ["flatten", "center", "mean", "sum", "max"]}),
-        ("center_bp", {"type": int}),
+        ("center_bp", _nullable(int)),
         ("hidden_sizes", {"type": str}),
-        ("proj_dim", {"type": int}),
-        ("first_layer_rank", {"type": int}),
+        ("proj_dim", _nullable(int)),
+        ("first_layer_rank", _nullable(int)),
         ("activation", {"type": str, "choices": ["relu", "gelu"]}),
         ("head_type", {"type": str, "choices": ["mpra", "deepstarr"]}),
         ("num_outputs", {"type": int}),
@@ -91,10 +105,15 @@ _SECTION_FLAGS: dict[str, list[tuple[str, dict[str, Any]]]] = {
         ("optimizer", {"type": str, "choices": ["adam", "adamw"]}),
         ("weight_decay", {"type": float}),
         ("gradient_accumulation_steps", {"type": int}),
-        ("gradient_clip", {"type": float}),
+        ("gradient_clip", _nullable(float)),
     ],
     "stage1": _STAGE_FLAGS,
-    "stage2": [*_STAGE_FLAGS, ("encoder_lr", {"type": float})],
+    "stage2": [
+        *_STAGE_FLAGS,
+        ("encoder_lr", {"type": float}),
+        ("encoder_locon_rank", _nullable(int)),
+        ("encoder_unfreeze_first_conv", {"action": argparse.BooleanOptionalAction}),
+    ],
     "checkpoint": [
         ("pretrained_weights", {"type": str}),
         ("checkpoint_dir", {"type": str}),
@@ -166,7 +185,9 @@ def build_overrides(args: argparse.Namespace) -> dict[str, Any]:
         values = {name: getattr(args, _flag_name(section, name), None) for name, _ in flags}
         if section == "head" and values.get("hidden_sizes") is not None:
             values["hidden_sizes"] = parse_hidden_sizes(values["hidden_sizes"])
-        overrides[section] = {name: value for name, value in values.items() if value is not None}
+        overrides[section] = {
+            name: None if value is _NULL else value for name, value in values.items() if value is not None
+        }
     return overrides
 
 
