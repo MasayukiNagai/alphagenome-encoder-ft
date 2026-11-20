@@ -57,6 +57,7 @@ _STAGE_FLAGS: list[tuple[str, dict[str, Any]]] = [
     ("plateau_factor", {"type": float}),
     ("plateau_patience", {"type": int}),
     ("plateau_min_lr", {"type": float}),
+    ("ema_decay", {"type": float}),
 ]
 
 # Both stage sections have the same fields, so their flags carry the section name:
@@ -97,7 +98,6 @@ _SECTION_FLAGS: dict[str, list[tuple[str, dict[str, Any]]]] = {
     "stage2": [
         *_STAGE_FLAGS,
         ("encoder_lr", {"type": float}),
-        ("ema_decay", {"type": float}),
         ("encoder_locon_rank", {"type": int}),
         ("encoder_unfreeze_first_conv", {"action": argparse.BooleanOptionalAction}),
     ],

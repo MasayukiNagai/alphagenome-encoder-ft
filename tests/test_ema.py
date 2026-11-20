@@ -1,4 +1,4 @@
-"""Stage-2 EMA of the trainable weights (stage2.ema_decay)."""
+"""EMA of the trainable weights (stage1.ema_decay, stage2.ema_decay)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from alphagenome_encoder_ft import cli
-from alphagenome_encoder_ft.config import Stage2Config, TrainConfig
+from alphagenome_encoder_ft.config import Stage2Config, StageConfig, TrainConfig
 from alphagenome_encoder_ft.heads import MPRAHead
 from alphagenome_encoder_ft.model import AlphaGenomeEncoderModel
 from alphagenome_encoder_ft.train import (
@@ -76,38 +76,67 @@ def test_ema_covers_only_trainable_params():
     assert not any(n.startswith("backbone.encoder.embed") for n in names)
 
 
-def test_config_validation():
-    with pytest.raises(ValueError, match=r"ema_decay must be in \(0, 1\)"):
-        Stage2Config(ema_decay=1.0)
+@pytest.mark.parametrize(("cls", "section"), [(StageConfig, "stage1"), (Stage2Config, "stage2")])
+def test_config_validation(cls, section: str):
+    with pytest.raises(ValueError, match=rf"{section}\.ema_decay must be in \(0, 1\)"):
+        cls(ema_decay=1.0)
 
 
-def test_cli_flag(tmp_path: Path):
+def test_cli_flags(tmp_path: Path):
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(make_config(tmp_path, stage2={"encoder_lr": 1e-4}).to_dict()))
     parser = cli.add_train_arguments(argparse.ArgumentParser())
-    args = parser.parse_args(["--config", str(config_path), "--stage2_ema_decay", "0.999"])
-    assert cli.load_config(parser, args).stage2.ema_decay == 0.999
+    args = parser.parse_args(
+        ["--config", str(config_path), "--stage1_ema_decay", "0.99", "--stage2_ema_decay", "0.999"]
+    )
+    config = cli.load_config(parser, args)
+    assert (config.stage1.ema_decay, config.stage2.ema_decay) == (0.99, 0.999)
 
 
 def test_config_without_the_field_still_loads(tmp_path: Path):
     raw = make_config(tmp_path, stage2={"encoder_lr": 1e-4}).to_dict()
+    del raw["stage1"]["ema_decay"]
     del raw["stage2"]["ema_decay"]
-    assert TrainConfig.from_dict(raw).stage2.ema_decay is None
+    config = TrainConfig.from_dict(raw)
+    assert config.stage1.ema_decay is None and config.stage2.ema_decay is None
 
 
-def test_two_stage_run_saves_the_averaged_weights(tmp_path: Path):
+def _two_stage_run(tmp_path: Path, stage1: dict, stage2: dict):
     torch.manual_seed(0)
     model = _model()
     x = torch.randn(12, 2, 4)
     loader = DataLoader(TensorDataset(x, x.sum(dim=(1, 2))), batch_size=4)
     stage = {"num_epochs": 1, "early_stopping_patience": 5, "head_lr": 1e-3, "lr_scheduler": "constant"}
-    config = make_config(tmp_path, stage1=stage, stage2={**stage, "encoder_lr": 1e-3, "ema_decay": 0.9})
+    config = make_config(tmp_path, stage1={**stage, **stage1}, stage2={**stage, "encoder_lr": 1e-3, **stage2})
+    model_before_stage2 = {}
+
+    def stage2_optimizer_factory(m):
+        model_before_stage2.update({k: v.detach().clone() for k, v in m.head.state_dict().items()})
+        return create_stage2_optimizer(config, m)
+
     result = run_two_stage_training(
         model, loader,
         stage1_optimizer=create_stage1_optimizer(config, model),
-        stage2_optimizer_factory=lambda m: create_stage2_optimizer(config, m),
+        stage2_optimizer_factory=stage2_optimizer_factory,
         config=config, device="cpu", val_loader=loader,
     )
+    return model, result, model_before_stage2
+
+
+def test_stage2_saves_the_averaged_weights(tmp_path: Path):
+    model, result, _ = _two_stage_run(tmp_path, {}, {"ema_decay": 0.9})
     saved = torch.load(result["stage2"]["best_checkpoint_path"], weights_only=False)["encoder_state_dict"]
     # The live weights kept training after the averaged ones were saved.
     assert not torch.equal(saved["out.weight"], model.encoder.out.weight.detach())
+
+
+def test_stage1_ema_averages_the_head_and_stage2_starts_from_it(tmp_path: Path):
+    _, result, head_at_stage2_start = _two_stage_run(tmp_path / "ema", {"ema_decay": 0.9}, {})
+    saved = torch.load(result["stage1"]["best_checkpoint_path"], weights_only=False)["head_state_dict"]
+    _, plain_result, _ = _two_stage_run(tmp_path / "plain", {}, {})
+    plain = torch.load(plain_result["stage1"]["best_checkpoint_path"], weights_only=False)["head_state_dict"]
+    # Same seed and data, so the saved heads differ only by the averaging.
+    assert any(not torch.equal(saved[key], plain[key]) for key in saved)
+    # Stage 2 reloads the stage-1 best.pt, which holds the averaged head.
+    for key, value in saved.items():
+        assert torch.equal(value, head_at_stage2_start[key])

@@ -537,8 +537,7 @@ def run_training_stage(
     if stage_dir is not None:
         stage_dir.mkdir(parents=True, exist_ok=True)
 
-    # Weight averaging is a stage-2 option (absent from stage 1's config).
-    ema_decay = getattr(stage_config, "ema_decay", None)
+    ema_decay = stage_config.ema_decay
     ema = ParameterEMA(model, ema_decay) if ema_decay is not None else None
     averaged = ema.applied if ema is not None else nullcontext
 
