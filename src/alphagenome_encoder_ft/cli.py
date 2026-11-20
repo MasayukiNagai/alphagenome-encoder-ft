@@ -549,14 +549,21 @@ def collect_predictions(
     *,
     device: torch.device,
     use_amp: bool,
+    reverse_complement: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return ``(y_true, y_pred)``: ``(N,)`` for scalar heads, ``(N, K)`` otherwise."""
+    """Return ``(y_true, y_pred)``: ``(N,)`` for scalar heads, ``(N, K)`` otherwise.
+
+    ``reverse_complement`` scores the reverse complement of every input, the same flip of the
+    whole assembled sequence that RC augmentation applies.
+    """
 
     model.eval()
     targets_all: list[np.ndarray] = []
     preds_all: list[np.ndarray] = []
     for sequences, targets in data_loader:
         sequences = sequences.to(device)
+        if reverse_complement:
+            sequences = sequences.flip(1)[..., [3, 2, 1, 0]]
         organism_idx = torch.zeros(sequences.shape[0], dtype=torch.long, device=device)
         if use_amp and device.type == "cuda":
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
@@ -656,13 +663,21 @@ def evaluate_checkpoint(
     device: str | None = None,
     use_amp: bool | None = None,
     extra_columns: dict[str, list[Any]] | None = None,
+    split: str = "test",
+    rc_average: bool = False,
 ) -> tuple[dict[str, Any], np.ndarray, np.ndarray]:
     """Score a checkpoint on ``make_test_dataset(model.construct)`` and write metrics/predictions/plot.
 
+    ``make_test_dataset`` returns the dataset of whichever split is scored; ``split`` only
+    names the outputs (``<split>_predictions.csv``, and ``<split>_metrics.json`` through
+    :func:`write_metrics`). With ``rc_average`` the prediction is the mean of the forward and
+    reverse-complement passes; the forward-only metrics are kept under ``forward_only`` and
+    both passes are written to the predictions file.
+
     Loader and runtime arguments default to the values in the checkpoint's saved config.
     ``extra_columns`` (e.g. sequence ids, aligned with the dataset order) are written into
-    ``test_predictions.csv``. Returns ``(metrics, y_true, y_pred)`` for callers that want to
-    add their own stratified metrics.
+    the predictions file. Returns ``(metrics, y_true, y_pred)`` for callers that want to add
+    their own stratified metrics.
     """
 
     checkpoint_path = Path(checkpoint_path).resolve()
@@ -679,20 +694,36 @@ def evaluate_checkpoint(
     resolved_device = torch.device(device or config.runtime.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"Using device: {resolved_device}")
 
-    out_dir = Path(output_dir) if output_dir is not None else checkpoint_path.parent / f"{checkpoint_path.stem}_test_eval"
+    out_dir = Path(output_dir) if output_dir is not None else checkpoint_path.parent / f"{checkpoint_path.stem}_{split}_eval"
     out_dir = out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     model = AlphaGenomeEncoderModel.from_checkpoint(checkpoint_path, device=resolved_device)
-    test_dataset = make_test_dataset(model.construct)
-    test_loader = create_dataloader(
-        test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory
+    dataset = make_test_dataset(model.construct)
+    loader = create_dataloader(
+        dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory
     )
-    y_true, y_pred = collect_predictions(model, test_loader, device=resolved_device, use_amp=use_amp)
+    y_true, y_pred = collect_predictions(model, loader, device=resolved_device, use_amp=use_amp)
+
+    columns = dict(extra_columns or {})
+    forward_only = None
+    if rc_average:
+        _, y_pred_rc = collect_predictions(
+            model, loader, device=resolved_device, use_amp=use_amp, reverse_complement=True
+        )
+        forward_only = regression_metrics(y_true, y_pred)
+        if y_true.ndim == 1:
+            columns["y_pred_fwd"] = y_pred.tolist()
+            columns["y_pred_rc"] = y_pred_rc.tolist()
+        y_pred = (y_pred + y_pred_rc) / 2
 
     metrics = regression_metrics(y_true, y_pred)
+    if forward_only is not None:
+        metrics["forward_only"] = forward_only
     metrics.update(
         {
+            "split": split,
+            "rc_average": rc_average,
             "checkpoint_path": str(checkpoint_path),
             "output_dir": str(out_dir),
             "construct": model.construct.to_dict() if model.construct is not None else None,
@@ -701,18 +732,17 @@ def evaluate_checkpoint(
         }
     )
 
-    if extra_columns is not None:
-        for key, values in extra_columns.items():
-            if len(values) != len(y_true):
-                raise ValueError(f"extra column {key!r} has {len(values)} rows but there are {len(y_true)} predictions")
+    for key, values in columns.items():
+        if len(values) != len(y_true):
+            raise ValueError(f"extra column {key!r} has {len(values)} rows but there are {len(y_true)} predictions")
 
-    save_predictions(out_dir / "test_predictions.csv", y_true, y_pred, extra_columns)
-    save_scatter_plot(out_dir / "y_vs_y_pred.png", y_true, y_pred, metrics)
+    save_predictions(out_dir / f"{split}_predictions.csv", y_true, y_pred, columns)
+    save_scatter_plot(out_dir / f"{split}_y_vs_y_pred.png", y_true, y_pred, metrics)
     return metrics, y_true, y_pred
 
 
-def write_metrics(output_dir: str | Path, metrics: dict[str, Any]) -> Path:
-    path = Path(output_dir) / "test_metrics.json"
+def write_metrics(output_dir: str | Path, metrics: dict[str, Any], split: str = "test") -> Path:
+    path = Path(output_dir) / f"{split}_metrics.json"
     with open(path, "w") as handle:
         json.dump(metrics, handle, indent=2)
     print(json.dumps(metrics, indent=2))

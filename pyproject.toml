@@ -15,6 +15,10 @@ dev = [
     "pytest",
 ]
 
+# `uv sync` installs this package into the repo's own environment, so the scripts can import it.
+[tool.uv]
+package = true
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]

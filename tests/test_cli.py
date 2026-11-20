@@ -159,3 +159,21 @@ def test_train_logs_every_validation_pass_with_learning_rates(tmp_path: Path, du
     assert history["lr_encoder"][:n_stage1] == [None] * n_stage1
     assert history["lr_encoder"][n_stage1:] == [config.stage2.encoder_lr] * (len(history["val_epoch"]) - n_stage1)
     assert ("stage1/*", "epoch") in defined and ("stage2/*", "epoch") in defined
+
+
+def test_collect_predictions_reverse_complement_flips_the_whole_input():
+    class FirstBaseModel(torch.nn.Module):
+        """Predicts the one-hot index of the first base, so a flip is visible."""
+
+        def forward(self, sequences, organism_idx):
+            return sequences[:, 0, :].argmax(dim=-1).float()
+
+    onehot = torch.nn.functional.one_hot(torch.tensor([[0, 1, 2], [3, 3, 1]]), 4).float()  # ACG, TTC
+    loader = [(onehot, torch.zeros(2))]
+    _, forward = cli.collect_predictions(FirstBaseModel(), loader, device=torch.device("cpu"), use_amp=False)
+    _, rc = cli.collect_predictions(
+        FirstBaseModel(), loader, device=torch.device("cpu"), use_amp=False, reverse_complement=True
+    )
+
+    assert forward.tolist() == [0.0, 3.0]  # A, T
+    assert rc.tolist() == [1.0, 2.0]  # rc(ACG) = CGT starts with C; rc(TTC) = GAA starts with G
