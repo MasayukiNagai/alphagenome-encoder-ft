@@ -66,8 +66,8 @@ class ParameterEMA:
     of a ``with`` block (validation, checkpointing) and restores the live weights after. After
     ``n`` updates the decay is ``min(decay, (1 + n) / (10 + n))``, so early averages are not
     dominated by the starting weights; ``decay`` itself applies only after about
-    ``9 / (1 - decay)`` updates (18,000 for 0.9995), and runs shorter than that average over
-    roughly the last ``n / 9`` steps whatever ``decay`` is.
+    ``9 / (1 - decay)`` updates, and runs shorter than that average over roughly the last
+    ``n / 9`` steps whatever ``decay`` is.
     """
 
     def __init__(self, model: torch.nn.Module, decay: float) -> None:
@@ -112,7 +112,7 @@ def _compute_metrics(
             value = value.detach().float().cpu().item()
         metrics[name] = float(value)
 
-    # multi-output heads (e.g. DeepSTARR dev+hk): also report per-track pearson.
+    # multi-output heads: also report per-track pearson.
     for idx, score in enumerate(per_track(pearsonr, preds, targets)):
         metrics[f"pearson_track{idx}"] = score
     return metrics
