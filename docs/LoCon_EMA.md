@@ -1,6 +1,6 @@
 # LoCon and EMA
 
-Two stage-2 options, both off unless set: low-rank convolution adapters on the encoder (LoCon, `stage2.encoder_locon_rank`) and an exponential moving average of the trained weights (EMA, `ema_decay`). The results below come from fine-tuning on two K562 MPRA libraries. They can be rerun with the scripts in `scripts/agarwal2025/` and `scripts/gosai2024/` (see [Reproduce](#reproduce)).
+Two stage-2 options, both off unless set: low-rank convolution adapters on the encoder (LoCon, `stage2.encoder_locon_rank`) and an exponential moving average of the trained weights (EMA, `ema_decay`). The results below come from fine-tuning on two K562 MPRA libraries, plus the HepG2 and WTC11 lentiMPRA libraries. They can be rerun with the scripts in `scripts/agarwal2025/` and `scripts/gosai2024/` (see [Reproduce](#reproduce)).
 
 ## Data
 
@@ -49,6 +49,30 @@ Seed ranges are .0002 to .0013 on validation.
 
 Full fine-tuning + EMA is the most accurate. LoCon + EMA was chosen anyway: it gives up about .001 while training 13% of the encoder's weights.
 
+### lentiMPRA HepG2 and WTC11
+
+The same four configs on the other two lentiMPRA cell types, with the same chromosome holdout. The hyperparameters were tuned on K562 and not retuned. Scoring and seeds as above; the change in brackets is against full fine-tuning.
+
+| Cell type | Train | Val | Test |
+|---|---|---|---|
+| HepG2 | 106,020 | 8,608 | 8,298 |
+| WTC11 | 38,461 | 4,224 | 3,500 |
+
+| Stage 2 | HepG2 val | HepG2 test | WTC11 val | WTC11 test |
+|---|---|---|---|---|
+| Stage 1 only | .8939 | .8642 | .8598 | .8038 |
+| Full fine-tuning | .9145 | .8923 | .8705 | .8106 |
+| Full fine-tuning + EMA | **.9149** (+.0004) | **.8934** (+.0011) | **.8711** (+.0006) | **.8140** (+.0034) |
+| LoCon r128 | .9122 (-.0023) | .8881 (-.0042) | .8681 (-.0024) | .8112 (+.0006) |
+| LoCon r128 + EMA | .9140 (-.0005) | .8906 (-.0017) | .8688 (-.0017) | .8129 (+.0023) |
+
+Seed ranges are .0002 to .0011 on HepG2 validation and .0003 to .0022 on WTC11.
+
+- Full fine-tuning + EMA is again the most accurate, on validation and test of both cell types.
+- EMA adds less on validation than on K562 (+.0004 and +.0006) but more on WTC11 test (+.0034).
+- LoCon falls further behind than on K562: about .0024 below full fine-tuning on validation without EMA, and LoCon + EMA is .0009 (HepG2) and .0023 (WTC11) below full fine-tuning + EMA. The WTC11 LoCon runs vary most between seeds (range about .002).
+- Stage 2 adds +.021 over stage 1 on HepG2 validation, as on K562, but only +.011 on WTC11, the smallest library.
+
 ## On a new dataset
 
 - **EMA.** Count the decay in optimizer steps, not epochs. Compare `9 / (1 - d)` with the steps to the expected best checkpoint; if the run is shorter, the choice of `d` hardly matters.
@@ -71,6 +95,8 @@ done
 python scripts/summarize_runs.py results/agarwal2025_K562_locon_ema
 ```
 
+For HepG2 or WTC11, run `0_add_coordinates.py --celltype HepG2` (or `WTC11`) on that cell type's table and point `INPUT_TSV` and `OUT_DIR` at it; the configs are the same.
+
 Gosai, from Supplementary Table S2 of Gosai et al. 2024:
 
 ```bash
@@ -83,7 +109,7 @@ done
 python scripts/summarize_runs.py results/gosai2024_K562_locon_ema
 ```
 
-On one H100, a seed takes roughly 1.5 hours on lentiMPRA and 6 hours on Gosai. The seeds are independent and can run in parallel.
+On one H100, a seed takes roughly 1.5 hours on lentiMPRA K562, 1 hour on HepG2, 20 minutes on WTC11 and 6 hours on Gosai. The seeds are independent and can run in parallel.
 
 What to expect:
 
