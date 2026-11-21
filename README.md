@@ -203,7 +203,7 @@ src/alphagenome_encoder_ft/
 ├── config.py     # TrainConfig and friends
 └── cli.py        # argparse/config/run-directory scaffolding for the scripts
 configs/          # training hyperparameters, <dataset>_<stage-2 setting>.json
-docs/             # LoCon_EMA.md: the stage-2 options compared on two libraries
+docs/             # LoCon_EMA.md (stage-2 options), low_rank_head.md (first_layer_rank)
 scripts/
 ├── agarwal2025/  # lentiMPRA: coordinates, chromosome-split reader, train, evaluate, reproduce
 ├── gosai2024/    # episomal MPRA: prepare, construct, reader, train, evaluate, reproduce
