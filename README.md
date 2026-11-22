@@ -143,7 +143,7 @@ In an MPRA the assayed molecule is a reporter construct, and only the insert cha
 ```python
 from alphagenome_encoder_ft import Construct
 
-construct = Construct(prefix=LEFT_ADAPTER, suffix=RIGHT_ADAPTER + PROMOTER + BARCODE, length=281)
+construct = Construct(prefix=LEFT_ADAPTER, suffix=RIGHT_ADAPTER + DOWNSTREAM, length=281, window_start=0)
 construct.assemble_sequence(insert)          # -> str, the model input
 construct.assemble_sequences([a, b, c])      # -> list[str]
 construct.assemble_onehot(insert_onehot)     # -> Tensor, differentiable
@@ -181,14 +181,16 @@ Two published libraries ship as classes that hold their reporter pieces and buil
 ```python
 from alphagenome_encoder_ft import LentiMPRAAgarwal2025Library, DeepSTARRDeAlmeida2022Library
 
-# left adapter + insert + right adapter + minP + barcode -> 281 bp
+# left adapter + insert + right adapter + minP and spacer -> 281 bp; the flank continues to the barcode
 LentiMPRAAgarwal2025Library.construct()
 
 # up adapter + insert + down adapter, windowed to 256 bp
 DeepSTARRDeAlmeida2022Library.construct()
 ```
 
-The pieces (`LEFT_ADAPTER`, `PROMOTER`, `BARCODE`, …) are attributes of those classes, so a layout of your own can reuse them.
+The pieces (`LEFT_ADAPTER`, `DOWNSTREAM`, …) are attributes of those classes, so a layout of your own can reuse them.
+
+The lentiMPRA `DOWNSTREAM` is read from the library's cloning primers (Supplementary Table S13), on the reporter strand: the minimal promoter in sense orientation, then the spacer, the barcode readout primer site and the barcode (`N`). Checkpoints trained before this was corrected, and checkpoints converted from the first JAX release, carry the construct they were trained with, because the construct is saved into the checkpoint. That construct had the reverse complement of the primer's tail after the right adapter (`TCCATTATATACCCTCTAGTGTCGGTTCACGCAATG` + a fixed barcode). It still loads and scores as trained.
 
 ## Repository layout
 
