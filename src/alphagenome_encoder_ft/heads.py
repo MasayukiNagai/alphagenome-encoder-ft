@@ -87,6 +87,12 @@ class MPRAHead(nn.Module):
     the norm. ``first_layer_rank``, if set, makes the first hidden layer low-rank: a bias-free
     ``Linear(in, r)`` followed by ``Linear(r, H)``, with no activation or dropout between them.
 
+    With ``num_outputs > 1`` the outputs share every layer and differ only in the rows of the
+    final ``Linear(H, num_outputs)``. ``per_output_hidden_layers`` instead gives each output
+    its own hidden layers and ``Linear(H, 1)``; the norm, ``proj_dim`` and the
+    ``first_layer_rank`` factor stay shared. Without ``first_layer_rank`` or ``proj_dim`` the
+    outputs then share no weights at all.
+
     ``norm_type`` selects the normalization applied to the encoder output before the MLP:
 
     - ``layer`` (default): ``LayerNorm(1536)`` over the channel dimension, per position.
@@ -108,6 +114,7 @@ class MPRAHead(nn.Module):
         norm_type: NormType = "layer",
         proj_dim: int | None = None,
         first_layer_rank: int | None = None,
+        per_output_hidden_layers: bool = False,
     ) -> None:
         super().__init__()
         if pooling_type not in {"flatten", "center", "mean", "sum", "max"}:
@@ -133,29 +140,53 @@ class MPRAHead(nn.Module):
         self.norm = _make_norm(self.norm_type, ENCODER_DIM)
         self.proj_dim = proj_dim
         self.first_layer_rank = first_layer_rank
+        self.per_output_hidden_layers = bool(per_output_hidden_layers)
         # Registered only when set, so other heads keep their state_dict keys.
         if proj_dim is not None:
             self.proj = nn.Linear(ENCODER_DIM, proj_dim, bias=False)
         if first_layer_rank is not None:
             self.first_layer_factor = nn.LazyLinear(first_layer_rank, bias=False)
-        self.hidden_layers = nn.ModuleList()
-        in_features: int | None = first_layer_rank
+        if self.per_output_hidden_layers:
+            self.branches = nn.ModuleList()
+            for _ in range(self.num_outputs):
+                hidden_layers, output_layer = self._build_hidden_stack(first_layer_rank, 1)
+                self.branches.append(nn.ModuleDict({"hidden_layers": hidden_layers, "output_layer": output_layer}))
+        else:
+            self.hidden_layers, self.output_layer = self._build_hidden_stack(first_layer_rank, self.num_outputs)
+
+    def _build_hidden_stack(self, in_features: int | None, num_outputs: int) -> tuple[nn.ModuleList, nn.Linear]:
+        """Hidden layers of ``hidden_sizes`` and the output layer after them."""
+
+        hidden_layers = nn.ModuleList()
         for hidden_size in self.hidden_sizes:
             linear = nn.LazyLinear(hidden_size) if in_features is None else nn.Linear(in_features, hidden_size)
-            self.hidden_layers.append(linear)
+            hidden_layers.append(linear)
             in_features = hidden_size
         assert in_features is not None
-        self.output_layer = nn.Linear(in_features, self.num_outputs)
+        return hidden_layers, nn.Linear(in_features, num_outputs)
 
-    def _apply_hidden_layers(self, x: torch.Tensor) -> torch.Tensor:
-        if self.first_layer_rank is not None:
-            x = self.first_layer_factor(x)
-        for linear in self.hidden_layers:
+    def _apply_hidden_layers(self, x: torch.Tensor, hidden_layers: nn.ModuleList) -> torch.Tensor:
+        for linear in hidden_layers:
             x = linear(x)
             if self.dropout is not None:
                 x = nn.functional.dropout(x, p=self.dropout, training=self.training)
             x = _make_activation(self.activation)(x)
         return x
+
+    def _predict(self, x: torch.Tensor) -> torch.Tensor:
+        """Features after the norm (and projection) -> ``(..., num_outputs)``."""
+
+        if self.first_layer_rank is not None:
+            x = self.first_layer_factor(x)
+        if self.per_output_hidden_layers:
+            return torch.cat(
+                [
+                    branch["output_layer"](self._apply_hidden_layers(x, branch["hidden_layers"]))
+                    for branch in self.branches
+                ],
+                dim=-1,
+            )
+        return self.output_layer(self._apply_hidden_layers(x, self.hidden_layers))
 
     def _normalize_encoder_output(self, encoder_output: torch.Tensor) -> torch.Tensor:
         x = encoder_output
@@ -196,14 +227,10 @@ class MPRAHead(nn.Module):
         if self.proj_dim is not None:
             x = self.proj(x)
         if self.pooling_type == "flatten":
-            x = x.flatten(1)
-            x = self._apply_hidden_layers(x)
-            preds = self.output_layer(x)
+            preds = self._predict(x.flatten(1))
             return preds.squeeze(-1) if self.num_outputs == 1 else preds
 
-        x = self._apply_hidden_layers(x)
-        preds = self.output_layer(x)
-        return self._pool_predictions(preds)
+        return self._pool_predictions(self._predict(x))
 
 
 class DeepSTARRHead(MPRAHead):
@@ -226,6 +253,7 @@ class DeepSTARRHead(MPRAHead):
         norm_type: NormType = "layer",
         proj_dim: int | None = None,
         first_layer_rank: int | None = None,
+        per_output_hidden_layers: bool = False,
     ) -> None:
         super().__init__(
             pooling_type=pooling_type,
@@ -237,4 +265,5 @@ class DeepSTARRHead(MPRAHead):
             norm_type=norm_type,
             proj_dim=proj_dim,
             first_layer_rank=first_layer_rank,
+            per_output_hidden_layers=per_output_hidden_layers,
         )

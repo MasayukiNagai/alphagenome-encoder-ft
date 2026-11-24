@@ -9,6 +9,10 @@ columns ``IDs, chr, sequence, <cell>_log2FC, <cell>_lfcSE``. It ships inserts wi
 This picks the cell type, drops unmeasured rows and Malinois's outlier rows, and writes
 `seq_id, seq, mean_value, rev, chrom, insert_len, max_lfc_se`.
 
+Given several cell types (`--cell_type K562 HepG2 SKNSH`) it writes one target column per cell
+type, named after it, in place of `mean_value`, for a multi-output model. The rows are the
+same either way.
+
 `seq` is the insert verbatim. The reporter around it is NOT written here: it is
 `EpisomalMPRAGosai2024Library.construct()`, applied when the dataset is loaded, so it travels
 with the checkpoint and the same rule builds the model input at inference time. See
@@ -57,7 +61,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--source", type=str, required=True, help="Gosai et al. 2024 Table S2")
-    parser.add_argument("--cell_type", type=str, default="K562", choices=CELL_TYPES)
+    parser.add_argument("--cell_type", type=str, nargs="+", default=["K562"], choices=CELL_TYPES,
+                        help="one cell type -> a mean_value column; several -> one column each")
     parser.add_argument("--output", type=str, required=True, help="TSV to write")
     parser.add_argument("--outlier_sd", type=float, default=6.0,
                         help="drop rows beyond this many SD from the per-cell-type mean in "
@@ -118,7 +123,9 @@ def main() -> int:
     if not source.is_file():
         raise SystemExit(f"source table not found: {source}")
 
-    target_col = f"{args.cell_type}_log2FC"
+    cell_types = list(dict.fromkeys(args.cell_type))
+    source_columns = [f"{cell}_log2FC" for cell in cell_types]
+    target_columns = ["mean_value"] if len(cell_types) == 1 else cell_types
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -138,13 +145,13 @@ def main() -> int:
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
         # chrom selects the split at load time. insert_len is annotation that lets
         # evaluation stratify by insert length. max_lfc_se selects Malinois's test rows.
-        writer.writerow(["seq_id", "seq", "mean_value", "rev", "chrom", "insert_len", "max_lfc_se"])
+        writer.writerow(["seq_id", "seq", *target_columns, "rev", "chrom", "insert_len", "max_lfc_se"])
         for row, is_outlier in zip(rows, outliers):
             ids, chrom = row["IDs"], row["chr"]
             if is_outlier:
                 dropped_by_chrom[chrom] += 1
                 continue
-            value = float(row[target_col])
+            values = [f"{float(row[column]):.10g}" for column in source_columns]
             insert = row["sequence"].strip().upper()
             max_lfc_se = max(float(row[f"{cell}_lfcSE"]) for cell in CELL_TYPES)
             if not insert or set(insert) - set("ACGT"):
@@ -157,7 +164,7 @@ def main() -> int:
                 )
             # rev is always 0: the source has no reverse-complement duplicate rows, and
             # RC is applied as an on-the-fly augmentation by the dataset.
-            writer.writerow([ids, insert, f"{value:.10g}", 0, chrom, len(insert), f"{max_lfc_se:.10g}"])
+            writer.writerow([ids, insert, *values, 0, chrom, len(insert), f"{max_lfc_se:.10g}"])
             chrom_counts[chrom] += 1
             length_counts[len(insert)] += 1
             written += 1
@@ -174,8 +181,8 @@ def main() -> int:
             source.stat().st_mtime, timezone.utc
         ).isoformat(timespec="seconds"),
         "output": str(output),
-        "cell_type": args.cell_type,
-        "target_column": target_col,
+        "cell_type": cell_types[0] if len(cell_types) == 1 else cell_types,
+        "target_columns": dict(zip(target_columns, source_columns)),
         "rows_written": written,
         "outliers": {
             "rule": "any cell type log2FC >= mean + outlier_sd*SD + outlier_up_shift or <= mean - outlier_sd*SD",

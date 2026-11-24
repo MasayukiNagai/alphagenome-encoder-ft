@@ -86,6 +86,7 @@ class HeadConfig:
     norm_type: str = "layer"
     proj_dim: int | None = None
     first_layer_rank: int | None = None
+    per_output_hidden_layers: bool = False
 
     def __post_init__(self) -> None:
         self.hidden_sizes = parse_hidden_sizes(self.hidden_sizes)
@@ -381,4 +382,5 @@ def head_kwargs_of(head: Any) -> dict[str, Any]:
         "norm_type": head.norm_type,
         "proj_dim": head.proj_dim,
         "first_layer_rank": head.first_layer_rank,
+        "per_output_hidden_layers": head.per_output_hidden_layers,
     }

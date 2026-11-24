@@ -27,7 +27,8 @@
     "proj_dim": null,
     "first_layer_rank": 128,
     "head_type": "mpra",
-    "num_outputs": 1
+    "num_outputs": 1,
+    "per_output_hidden_layers": false
   },
   "optim": {
     "optimizer": "adamw",

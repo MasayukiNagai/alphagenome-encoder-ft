@@ -96,6 +96,7 @@ _SECTION_FLAGS: dict[str, list[tuple[str, dict[str, Any]]]] = {
         ("hidden_sizes", {"type": str}),
         ("proj_dim", _nullable(int)),
         ("first_layer_rank", _nullable(int)),
+        ("per_output_hidden_layers", {"action": argparse.BooleanOptionalAction}),
         ("activation", {"type": str, "choices": ["relu", "gelu"]}),
         ("head_type", {"type": str, "choices": ["mpra", "deepstarr"]}),
         ("num_outputs", {"type": int}),

@@ -3,6 +3,10 @@
 One implementation per statistic. The training loop reports them per epoch from torch
 tensors; the evaluation scripts report them once from numpy arrays. Every function here
 accepts either, so a correlation never depends on which caller computed it.
+
+A NaN in ``y_true`` is a missing label: every statistic skips those entries, so a
+multi-output dataset whose rows are not measured in every track is scored on what was
+measured.
 """
 
 from __future__ import annotations
@@ -22,11 +26,14 @@ def _as_float64(values: Any) -> np.ndarray:
 
 
 def _as_flat_pair(y_true: Any, y_pred: Any) -> tuple[np.ndarray, np.ndarray]:
+    """Both arrays flattened, without the entries whose label is missing."""
+
     true_values = _as_float64(y_true).reshape(-1)
     pred_values = _as_float64(y_pred).reshape(-1)
     if true_values.shape != pred_values.shape:
         raise ValueError(f"Shape mismatch: {true_values.shape} vs {pred_values.shape}")
-    return true_values, pred_values
+    observed = ~np.isnan(true_values)
+    return true_values[observed], pred_values[observed]
 
 
 def _average_ranks(values: np.ndarray) -> np.ndarray:
@@ -82,7 +89,8 @@ def regression_metrics(y_true: Any, y_pred: Any) -> dict[str, Any]:
     """Full evaluation summary: counts, error magnitudes and both correlations.
 
     For ``(N, K)`` targets the correlations are the mean across tracks, and each track's
-    own values are listed under ``per_track``.
+    own values and number of labelled rows are listed under ``per_track``. ``n_samples`` counts
+    rows; the error magnitudes are over the labelled entries.
     """
 
     true_values = _as_float64(y_true)
@@ -90,13 +98,14 @@ def regression_metrics(y_true: Any, y_pred: Any) -> dict[str, Any]:
     if true_values.shape != pred_values.shape:
         raise ValueError(f"Shape mismatch: {true_values.shape} vs {pred_values.shape}")
 
-    residual = pred_values - true_values
-    mse = float(np.mean(np.square(residual))) if true_values.size else float("nan")
+    observed = ~np.isnan(true_values)
+    residual = (pred_values - true_values)[observed]
+    mse = float(np.mean(np.square(residual))) if residual.size else float("nan")
     metrics: dict[str, Any] = {
         "n_samples": int(true_values.shape[0]) if true_values.ndim else 0,
         "mse": mse,
         "rmse": float(math.sqrt(mse)) if not math.isnan(mse) else float("nan"),
-        "mae": float(np.mean(np.abs(residual))) if true_values.size else float("nan"),
+        "mae": float(np.mean(np.abs(residual))) if residual.size else float("nan"),
     }
 
     if true_values.ndim == 1 or true_values.shape[1] == 1:
@@ -105,8 +114,9 @@ def regression_metrics(y_true: Any, y_pred: Any) -> dict[str, Any]:
         return metrics
 
     tracks = [
-        {"pearsonr": p, "spearmanr": s}
-        for p, s in zip(
+        {"n_samples": int(n), "pearsonr": p, "spearmanr": s}
+        for n, p, s in zip(
+            observed.sum(axis=0),
             per_track(pearsonr, true_values, pred_values),
             per_track(spearmanr, true_values, pred_values),
             strict=True,
