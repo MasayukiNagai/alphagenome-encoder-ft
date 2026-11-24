@@ -10,6 +10,7 @@ import torch.nn as nn
 
 PoolingType = Literal["flatten", "center", "mean", "sum", "max"]
 NormType = Literal["layer", "batch", "group", "none"]
+SplitAt = Literal["output", "hidden", "input"]
 ENCODER_RESOLUTION_BP = 128
 ENCODER_DIM = 1536
 NORM_GROUPS = 8
@@ -87,11 +88,14 @@ class MPRAHead(nn.Module):
     the norm. ``first_layer_rank``, if set, makes the first hidden layer low-rank: a bias-free
     ``Linear(in, r)`` followed by ``Linear(r, H)``, with no activation or dropout between them.
 
-    With ``num_outputs > 1`` the outputs share every layer and differ only in the rows of the
-    final ``Linear(H, num_outputs)``. ``per_output_hidden_layers`` instead gives each output
-    its own hidden layers and ``Linear(H, 1)``; the norm, ``proj_dim`` and the
-    ``first_layer_rank`` factor stay shared. Without ``first_layer_rank`` or ``proj_dim`` the
-    outputs then share no weights at all.
+    With ``num_outputs > 1``, ``split_at`` sets where the outputs stop sharing layers:
+
+    - ``output`` (default): every layer is shared; the outputs differ only in the rows of the
+      final ``Linear(H, num_outputs)``.
+    - ``hidden``: the norm, ``proj_dim`` and the ``first_layer_rank`` factor are shared; each
+      output has its own hidden layers and ``Linear(H, 1)``.
+    - ``input``: nothing is shared; each output is a whole single-output head of its own
+      (norm, projection, factor, hidden and output layers) reading the encoder output.
 
     ``norm_type`` selects the normalization applied to the encoder output before the MLP:
 
@@ -114,9 +118,11 @@ class MPRAHead(nn.Module):
         norm_type: NormType = "layer",
         proj_dim: int | None = None,
         first_layer_rank: int | None = None,
-        per_output_hidden_layers: bool = False,
+        split_at: SplitAt = "output",
     ) -> None:
         super().__init__()
+        if split_at not in {"output", "hidden", "input"}:
+            raise ValueError(f"split_at must be one of output, hidden, input; got {split_at!r}")
         if pooling_type not in {"flatten", "center", "mean", "sum", "max"}:
             raise ValueError(f"Unknown pooling_type: {pooling_type}")
         if pooling_type in {"mean", "sum", "max"} and center_bp <= 0:
@@ -137,16 +143,27 @@ class MPRAHead(nn.Module):
         self.activation = activation
         self.num_outputs = int(num_outputs)
         self.norm_type = "none" if norm_type is None else str(norm_type).lower()
-        self.norm = _make_norm(self.norm_type, ENCODER_DIM)
         self.proj_dim = proj_dim
         self.first_layer_rank = first_layer_rank
-        self.per_output_hidden_layers = bool(per_output_hidden_layers)
+        self.split_at = split_at
+        if split_at == "input":
+            # One complete single-output head per output; this module only collects them.
+            self.heads = nn.ModuleList(
+                MPRAHead(
+                    pooling_type=pooling_type, center_bp=center_bp, hidden_sizes=self.hidden_sizes,
+                    dropout=dropout, activation=activation, num_outputs=1, norm_type=norm_type,
+                    proj_dim=proj_dim, first_layer_rank=first_layer_rank,
+                )
+                for _ in range(self.num_outputs)
+            )
+            return
+        self.norm = _make_norm(self.norm_type, ENCODER_DIM)
         # Registered only when set, so other heads keep their state_dict keys.
         if proj_dim is not None:
             self.proj = nn.Linear(ENCODER_DIM, proj_dim, bias=False)
         if first_layer_rank is not None:
             self.first_layer_factor = nn.LazyLinear(first_layer_rank, bias=False)
-        if self.per_output_hidden_layers:
+        if split_at == "hidden":
             self.branches = nn.ModuleList()
             for _ in range(self.num_outputs):
                 hidden_layers, output_layer = self._build_hidden_stack(first_layer_rank, 1)
@@ -178,7 +195,7 @@ class MPRAHead(nn.Module):
 
         if self.first_layer_rank is not None:
             x = self.first_layer_factor(x)
-        if self.per_output_hidden_layers:
+        if self.split_at == "hidden":
             return torch.cat(
                 [
                     branch["output_layer"](self._apply_hidden_layers(x, branch["hidden_layers"]))
@@ -223,6 +240,9 @@ class MPRAHead(nn.Module):
         return pooled.squeeze(-1) if self.num_outputs == 1 else pooled
 
     def forward(self, encoder_output: torch.Tensor) -> torch.Tensor:
+        if self.split_at == "input":
+            preds = torch.stack([head(encoder_output) for head in self.heads], dim=-1)
+            return preds.squeeze(-1) if self.num_outputs == 1 else preds
         x = self._normalize_encoder_output(encoder_output)
         if self.proj_dim is not None:
             x = self.proj(x)
@@ -253,7 +273,7 @@ class DeepSTARRHead(MPRAHead):
         norm_type: NormType = "layer",
         proj_dim: int | None = None,
         first_layer_rank: int | None = None,
-        per_output_hidden_layers: bool = False,
+        split_at: SplitAt = "output",
     ) -> None:
         super().__init__(
             pooling_type=pooling_type,
@@ -265,5 +285,5 @@ class DeepSTARRHead(MPRAHead):
             norm_type=norm_type,
             proj_dim=proj_dim,
             first_layer_rank=first_layer_rank,
-            per_output_hidden_layers=per_output_hidden_layers,
+            split_at=split_at,
         )
