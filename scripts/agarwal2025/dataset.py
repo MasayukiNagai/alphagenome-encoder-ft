@@ -11,13 +11,19 @@ same chromosome. Elements without a locus (``chrom == "."``) go to training.
 
 Only ``rev == 0`` rows are read; reverse complements come from augmentation instead. Adapter
 stripping, the insert and the construct are those of ``LentiMPRAAgarwal2025Dataset``.
+
+The merged table ``0_merge_cell_types.py`` writes has one target column per cell type, blank
+where the element was not measured in that cell type. ``target_columns`` names the columns to
+read; a blank becomes a NaN label, which the default loss and the metrics skip.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
+
+import numpy as np
 
 from alphagenome_encoder_ft import (
     LentiMPRAAgarwal2025Dataset,
@@ -101,11 +107,13 @@ class LentiMPRAAgarwal2025ChromDataset(MPRADataset):
         val_chroms: Sequence[str] = MALINOIS_VAL_CHROMS,
         test_chroms: Sequence[str] = MALINOIS_TEST_CHROMS,
         sequence_column: str = "seq",
-        target_column: str = "mean_value",
+        target_columns: Sequence[str] = ("mean_value",),
+        target_standardization: Mapping[str, Mapping[str, float]] | None = None,
         **kwargs,
     ) -> None:
         self.input_tsv = Path(input_tsv)
         self.split = split
+        self.target_columns = tuple(target_columns)
         rows = self.read_rows(self.input_tsv, split, val_chroms, test_chroms)
         # rev == 1 rows carry the adapters reverse-complemented at the opposite ends, so
         # stripping runs after the rev filter, as in LentiMPRAAgarwal2025Dataset.
@@ -115,4 +123,55 @@ class LentiMPRAAgarwal2025ChromDataset(MPRADataset):
             self.LIBRARY.RIGHT_ADAPTER,
             labels=[row.get("seq_id", str(index)) for index, row in enumerate(rows)],
         )
-        super().__init__(inserts, [float(row[target_column]) for row in rows], **kwargs)
+        targets = read_targets(rows, self.target_columns, target_standardization)
+        super().__init__(inserts, targets, **kwargs)
+
+
+def _target_value(text: str) -> float:
+    """A blank or NA cell is a cell type the element was not measured in: a NaN label."""
+
+    return float("nan") if text.strip() in ("", "NA", "NaN", "nan") else float(text)
+
+
+def read_targets(
+    rows: Sequence[dict[str, str]],
+    target_columns: Sequence[str],
+    standardization: Mapping[str, Mapping[str, float]] | None = None,
+) -> list[float] | list[list[float]]:
+    """One value per row for a single column (a single-output head), else one list per row.
+
+    ``standardization`` maps a column to its ``mean`` and ``sd``; those columns are returned
+    as ``(value - mean) / sd``.
+    """
+
+    if not target_columns:
+        raise ValueError("target_columns must name at least one column")
+    if rows and (missing := [column for column in target_columns if column not in rows[0]]):
+        raise ValueError(f"no column(s) {missing} in the table")
+    scale = {column: (0.0, 1.0) for column in target_columns}
+    for column, stats in (standardization or {}).items():
+        scale[column] = (float(stats["mean"]), float(stats["sd"]))
+    values = [
+        [(_target_value(row[column]) - scale[column][0]) / scale[column][1] for column in target_columns]
+        for row in rows
+    ]
+    return [value[0] for value in values] if len(target_columns) == 1 else values
+
+
+def target_standardization(
+    input_tsv: str | Path,
+    target_columns: Sequence[str],
+    val_chroms: Sequence[str] = MALINOIS_VAL_CHROMS,
+    test_chroms: Sequence[str] = MALINOIS_TEST_CHROMS,
+) -> dict[str, dict[str, float]]:
+    """Mean and SD (ddof=0) of each target column over the labelled training rows."""
+
+    rows = LentiMPRAAgarwal2025ChromDataset.read_rows(input_tsv, "train", val_chroms, test_chroms)
+    stats = {}
+    for column in target_columns:
+        values = np.array([_target_value(row[column]) for row in rows], dtype=np.float64)
+        values = values[~np.isnan(values)]
+        if values.size < 2 or values.std() == 0:
+            raise ValueError(f"cannot standardize {column!r}: fewer than two distinct training labels")
+        stats[column] = {"mean": float(values.mean()), "sd": float(values.std()), "n": int(values.size)}
+    return stats

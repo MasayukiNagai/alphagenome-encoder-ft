@@ -8,6 +8,9 @@ selects the 600 bp window Malinois trained on instead. ``--val_chroms`` and ``--
 choose the held-out chromosomes (default: val chr19, 21, X; test chr7, 13), recorded in
 run.json for the evaluator. Hyperparameters come from ``--config``; any flag overrides it for
 a single run.
+
+``--target_columns`` trains one output per column of a table prepared for several cell types
+(``0_prepare.py --cell_type K562 HepG2 SKNSH``); set ``--num_outputs`` to the same count.
 """
 
 from __future__ import annotations
@@ -50,6 +53,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="validation chromosomes, with or without 'chr' (default: 19 21 X)")
     parser.add_argument("--test_chroms", nargs="+", default=list(MALINOIS_TEST_CHROMS),
                         help="test chromosomes, with or without 'chr' (default: 7 13)")
+    parser.add_argument("--target_columns", nargs="+", default=["mean_value"],
+                        help="target column(s), one output each (default: mean_value)")
     add_train_arguments(parser)
     add_construct_arguments(parser)
     return parser
@@ -64,6 +69,8 @@ def main() -> dict[str, Any]:
         val_chroms, test_chroms = (sorted(c) for c in check_holdout(args.val_chroms, args.test_chroms))
     except ValueError as exc:
         parser.error(str(exc))
+    if len(args.target_columns) != config.head.num_outputs:
+        parser.error(f"{len(args.target_columns)} target column(s) but head.num_outputs is {config.head.num_outputs}")
     default_construct = (
         EpisomalMPRAGosai2024Library.construct()
         if args.window == "regulatory"
@@ -77,6 +84,7 @@ def main() -> dict[str, Any]:
             split=split,
             val_chroms=val_chroms,
             test_chroms=test_chroms,
+            target_columns=args.target_columns,
             construct=construct,
             **dataset_kwargs(config, augment=split == "train"),
         )
@@ -91,6 +99,7 @@ def main() -> dict[str, Any]:
             "window": args.window,
             "val_chroms": val_chroms,
             "test_chroms": test_chroms,
+            "target_columns": args.target_columns,
         },
         show_progress=args.show_progress,
         resume_from_stage2=args.resume_from_stage2,

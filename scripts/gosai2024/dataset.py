@@ -71,6 +71,10 @@ class EpisomalMPRAGosai2024Dataset(MPRADataset):
 
     ``rev`` is always 0 in this table — the source has no reverse-complement duplicate rows —
     but it is filtered on anyway so the schema matches the other assays' readers.
+
+    A table prepared for several cell types has one target column per cell type instead of
+    ``mean_value``. ``target_columns`` names the ones to read: one column gives a scalar target
+    per row, several give one target per column, in that order.
     """
 
     LIBRARY = EpisomalMPRAGosai2024Library
@@ -115,14 +119,27 @@ class EpisomalMPRAGosai2024Dataset(MPRADataset):
         val_chroms: Sequence[str] = MALINOIS_VAL_CHROMS,
         test_chroms: Sequence[str] = MALINOIS_TEST_CHROMS,
         sequence_column: str = "seq",
-        target_column: str = "mean_value",
+        target_columns: Sequence[str] = ("mean_value",),
         **kwargs,
     ) -> None:
         self.input_tsv = Path(input_tsv)
         self.split = split
+        self.target_columns = tuple(target_columns)
         rows = self.read_rows(self.input_tsv, split, val_chroms, test_chroms)
         super().__init__(
             [row[sequence_column] for row in rows],
-            [float(row[target_column]) for row in rows],
+            read_targets(rows, self.target_columns),
             **kwargs,
         )
+
+
+def read_targets(rows: Sequence[dict[str, str]], target_columns: Sequence[str]) -> list[float] | list[list[float]]:
+    """One value per row for a single column (a single-output head), else one list per row."""
+
+    if not target_columns:
+        raise ValueError("target_columns must name at least one column")
+    if rows and (missing := [column for column in target_columns if column not in rows[0]]):
+        raise ValueError(f"no column(s) {missing} in the table; prepare it with these cell types")
+    if len(target_columns) == 1:
+        return [float(row[target_columns[0]]) for row in rows]
+    return [[float(row[column]) for column in target_columns] for row in rows]

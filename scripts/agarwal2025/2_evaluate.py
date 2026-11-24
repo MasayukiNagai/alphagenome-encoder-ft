@@ -71,10 +71,14 @@ def main() -> dict[str, Any]:
     test_chroms = args.test_chroms or run.get("test_chroms")
     if not val_chroms or not test_chroms:
         parser.error("no val_chroms/test_chroms in run.json; pass --val_chroms and --test_chroms")
+    # Targets are read, and standardized, as in training; metrics are on that scale.
+    target_columns = run.get("target_columns", ["mean_value"])
+    standardization = run.get("target_standardization")
 
     def make_dataset(construct: Construct | None) -> LentiMPRAAgarwal2025ChromDataset:
         dataset = LentiMPRAAgarwal2025ChromDataset(
-            input_tsv, split=args.split, val_chroms=val_chroms, test_chroms=test_chroms, construct=construct
+            input_tsv, split=args.split, val_chroms=val_chroms, test_chroms=test_chroms,
+            target_columns=target_columns, target_standardization=standardization, construct=construct,
         )
         check_insert_length(construct, dataset)
         return dataset
@@ -92,6 +96,8 @@ def main() -> dict[str, Any]:
         rc_average=not args.forward_only,
     )
     metrics["input_tsv"] = str(input_tsv)
+    metrics["target_columns"] = list(target_columns)
+    metrics["target_standardization"] = standardization
     metrics["val_chroms"] = list(val_chroms)
     metrics["test_chroms"] = list(test_chroms)
     write_metrics(metrics["output_dir"], metrics, split=args.split)

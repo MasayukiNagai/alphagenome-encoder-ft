@@ -56,7 +56,15 @@ def _autocast_context(device: torch.device, use_amp: bool):
 
 
 def _default_loss_fn(preds: Tensor, targets: Tensor) -> Tensor:
-    return F.mse_loss(preds.float(), targets.float())
+    """MSE over the observed targets. A NaN target is a missing label and adds nothing."""
+
+    preds, targets = preds.float(), targets.float()
+    observed = ~torch.isnan(targets)
+    if observed.all():
+        return F.mse_loss(preds, targets)
+    if not observed.any():
+        return preds.sum() * 0.0
+    return F.mse_loss(preds[observed], targets[observed])
 
 
 class ParameterEMA:
@@ -104,16 +112,19 @@ def _compute_metrics(
     targets: Tensor,
     metric_fns: dict[str, Callable[[Tensor, Tensor], Tensor | float]] | None,
 ) -> dict[str, float]:
-    functions = metric_fns or {"pearson": pearsonr}
+    tracks = per_track(pearsonr, targets, preds)
     metrics: dict[str, float] = {}
-    for name, fn in functions.items():
-        value = fn(preds, targets)
-        if isinstance(value, Tensor):
-            value = value.detach().float().cpu().item()
-        metrics[name] = float(value)
+    if not metric_fns:
+        # Multi-output heads: the mean of the per-track correlations, as in regression_metrics.
+        metrics["pearson"] = float(sum(tracks) / len(tracks)) if tracks else pearsonr(targets, preds)
+    else:
+        for name, fn in metric_fns.items():
+            value = fn(preds, targets)
+            if isinstance(value, Tensor):
+                value = value.detach().float().cpu().item()
+            metrics[name] = float(value)
 
-    # multi-output heads: also report per-track pearson.
-    for idx, score in enumerate(per_track(pearsonr, preds, targets)):
+    for idx, score in enumerate(tracks):
         metrics[f"pearson_track{idx}"] = score
     return metrics
 

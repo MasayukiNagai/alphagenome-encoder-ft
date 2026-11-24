@@ -105,10 +105,12 @@ def main() -> dict[str, Any]:
     test_chroms = args.test_chroms or run.get("test_chroms")
     if not val_chroms or not test_chroms:
         parser.error("no val_chroms/test_chroms in run.json; pass --val_chroms and --test_chroms")
+    target_columns = run.get("target_columns", ["mean_value"])
 
     def make_dataset(construct: Construct | None) -> EpisomalMPRAGosai2024Dataset:
         dataset = EpisomalMPRAGosai2024Dataset(
-            input_tsv, split=args.split, val_chroms=val_chroms, test_chroms=test_chroms, construct=construct
+            input_tsv, split=args.split, val_chroms=val_chroms, test_chroms=test_chroms,
+            target_columns=target_columns, construct=construct,
         )
         check_insert_lengths(construct, dataset)
         return dataset
@@ -136,6 +138,7 @@ def main() -> dict[str, Any]:
     if by_length:
         metrics["by_insert_length"] = by_length
     metrics["input_tsv"] = str(input_tsv)
+    metrics["target_columns"] = list(target_columns)
     metrics["val_chroms"] = list(val_chroms)
     metrics["test_chroms"] = list(test_chroms)
     write_metrics(metrics["output_dir"], metrics, split=args.split)
