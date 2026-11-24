@@ -132,11 +132,51 @@ def test_lentimpra_construct_wraps_the_element_in_the_whole_reporter():
     assembled = construct.assemble_sequence("A" * AGARWAL.INSERT_LENGTH)
 
     assert construct.length == AGARWAL.INPUT_LENGTH == 281
-    # 15 + 200 + 15 + 36 + 15 = 281, so nothing is trimmed or padded.
+    # 15 + 200 + 15 + 51 = 281: the window ends in the spacer after the minimal promoter, so the
+    # barcode is outside it and nothing is padded.
     assert len(assembled) == 281
     assert "N" not in assembled
     assert assembled.startswith(AGARWAL.LEFT_ADAPTER)
-    assert assembled.endswith(AGARWAL.BARCODE)
+    assert assembled.endswith(AGARWAL.DOWNSTREAM[:51])
+    assert construct.window_start == 0
+
+
+# The two reverse primers of Supplementary Table S13 that build the downstream sequence, verbatim.
+# They are written 5' to 3' on the strand opposite the reporter.
+_MINP_ENH_R = "ACAGTACCGGATTGCCAAGCTGGAAGTCGAGCTTCCATTATATACCCTCTAGTGTCGGTTCACGCAATG"
+_BC_PRIMER_R = "CTCACCATGGTGGCGACCGGTNNNNNNNNNNNNNNNCTTAGCTTTCGCTTAGCGATGTGTTCACTTTGCACAGTACCGGATTGC"
+
+
+def _reverse_complement(sequence: str) -> str:
+    return sequence.translate(str.maketrans("ACGTN", "TGCAN"))[::-1]
+
+
+def test_lentimpra_downstream_is_the_primers_read_on_the_reporter_strand():
+    """The reverse primers must be reverse-complemented before they describe the reporter."""
+
+    first = _reverse_complement(_MINP_ENH_R)
+    assert first.startswith(AGARWAL.RIGHT_ADAPTER)
+    second = _reverse_complement(_BC_PRIMER_R)
+    overlap = next(k for k in range(len(first), 14, -1) if first.endswith(second[:k]))
+    downstream = (first + second[overlap:])[len(AGARWAL.RIGHT_ADAPTER):]
+
+    assert downstream.startswith(AGARWAL.DOWNSTREAM)
+    assert len(AGARWAL.DOWNSTREAM) == 102
+    assert AGARWAL.DOWNSTREAM.endswith("N" * 15) and "N" not in AGARWAL.DOWNSTREAM[:-15]
+
+
+def test_lentimpra_construct_reaches_the_barcode_and_jitter_stays_on_real_sequence():
+    base = AGARWAL.construct()
+    element = "ACGT" * 50
+    full = AGARWAL.LEFT_ADAPTER + element + AGARWAL.RIGHT_ADAPTER + AGARWAL.DOWNSTREAM
+
+    # A longer window reaches the end of the barcode, 102 bp after the element's right adapter.
+    to_barcode = Construct(prefix=base.prefix, suffix=base.suffix, length=len(full), window_start=0)
+    assert to_barcode.assemble_sequence(element) == full
+
+    # Sliding right by the largest jitter keeps the insert whole and adds no padding.
+    base.check_insert_window(AGARWAL.INSERT_LENGTH, max_offset=15)
+    assert base.assemble_sequence(element, offset=15) == full[15:296]
 
 
 def test_lentimpra_construct_places_the_element_where_the_published_seq_has_it():

@@ -225,19 +225,36 @@ class LentiMPRAAgarwal2025Library:
 
     LEFT_ADAPTER = "AGGACCGGATCAACT"
     RIGHT_ADAPTER = "CATTGCGTGAACCGA"
-    PROMOTER = "TCCATTATATACCCTCTAGTGTCGGTTCACGCAATG"
-    BARCODE = "AGAGACTGAGGCCAC"
+    # What the library PCRs add after the right adapter, 5' to 3' on the reporter strand: the
+    # reverse complement of the two reverse primers (Supplementary Table S13), joined where they
+    # overlap. ``minP-enh-r`` anneals to the right adapter and adds the minimal promoter;
+    # ``pLSmP-bc-primer-r`` adds the rest of the spacer, the primer site of the barcode readout and
+    # the 15 nt random barcode, written ``N`` because it differs per molecule. The 102 bases end
+    # with the barcode, 102 bases past the end of the insert's right adapter.
+    DOWNSTREAM = (
+        "CACTAGAGGGTATATAATGGAAGCTCGACTTCCAG"  # CAC + minimal promoter
+        "CTTGGCAATCCGGTACTGT"  # spacer
+        "GCAAAGTGAACACATCGCTAAGCGAAAGC"  # readout primer site
+        "TAAG"
+        "NNNNNNNNNNNNNNN"  # barcode
+    )
     INSERT_LENGTH = 200
     INPUT_LENGTH = 281
 
     @classmethod
     def construct(cls) -> Construct:
-        """``left adapter + insert + right adapter + minP + barcode``."""
+        """``left adapter + insert + right adapter + downstream``, the first 281 bp.
+
+        The window starts at the left adapter. Of the downstream sequence it shows the first 51
+        bases, the minimal promoter and the spacer after it; the barcode lies beyond it, but the
+        flank carries it, so a longer ``length`` reaches it and jitter slides over real sequence.
+        """
 
         return Construct(
             prefix=cls.LEFT_ADAPTER,
-            suffix=cls.RIGHT_ADAPTER + cls.PROMOTER + cls.BARCODE,
+            suffix=cls.RIGHT_ADAPTER + cls.DOWNSTREAM,
             length=cls.INPUT_LENGTH,
+            window_start=0,
         )
 
 
