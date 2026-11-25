@@ -7,6 +7,11 @@ requires-python = ">=3.12"
 dependencies = [
     "alphagenome-pytorch @ git+https://github.com/genomicsxai/alphagenome-pytorch.git",
     "numpy",
+    # alphagenome-pytorch loads a backbone with safetensors.torch, which needs
+    # `packaging` and so is only installable through safetensors' `torch` extra.
+    # alphagenome-pytorch asks for plain `safetensors`, so without this a clean
+    # environment fails at --pretrained_weights with ModuleNotFoundError: packaging.
+    "safetensors[torch]",
     "torch",
 ]
 
