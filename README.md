@@ -47,7 +47,7 @@ Each published dataset has a folder under `scripts/` with its data preparation, 
 
 | folder | dataset | steps |
 |---|---|---|
-| `scripts/agarwal2025/` | lentiMPRA, Agarwal et al. 2025 | `0_add_coordinates.py` (genomic coordinates for a chromosome split), `1_train.py`, `2_evaluate.py` |
+| `scripts/agarwal2025/` | lentiMPRA, Agarwal et al. 2025 | `0_add_coordinates.py` (genomic coordinates, only for a chromosome split), `1_train.py`, `2_evaluate.py` |
 | `scripts/gosai2024/` | episomal MPRA, Gosai et al. 2024 | `0_prepare.py` (Supplementary Table S2 to a training TSV), `1_train.py`, `2_evaluate.py` |
 | `scripts/dealmeida2022/` | DeepSTARR, de Almeida et al. 2022 | `1_train.py`, `2_evaluate.py` |
 
@@ -62,6 +62,16 @@ python scripts/agarwal2025/2_evaluate.py --split test \
   --checkpoint_path results/agarwal2025_K562_locon_ema/stage2/best.pt
 ```
 
+lentiMPRA has two holdouts and `--split_by` chooses between them. The default, `chrom`,
+holds out chromosomes (val chr19, 21, X; test chr7, 13 — the split Malinois used, so this
+library and Gosai 2024 share one) and needs the table `0_add_coordinates.py` writes.
+`--split_by fold` holds out the folds Agarwal et al. ship in the published table (train
+2-9, val 1, test 10) and reads that table directly. **The released lentiMPRA checkpoints
+were trained and scored on the folds**, so a number comparable with theirs needs
+`--split_by fold`; the two splits have different test sets and their metrics cannot be
+compared. The choice is recorded in run.json and the evaluator reads it back, so a
+checkpoint is always scored on the rows it was trained against.
+
 `run_train.sh CONFIG` and `run_evaluate.sh RUN_DIR` in each folder wrap those two (the data and weights paths come from `INPUT_TSV` and `ALPHAGENOME_WEIGHTS`); both forward extra flags to the Python script. The lentiMPRA and Gosai evaluators average forward and reverse-complement predictions unless `--forward_only` is passed, and score `--split val` or `test`.
 
 Config files in `configs/` hold training hyperparameters only, and every field has a matching command-line flag that overrides it. They are named `<dataset>_<stage-2 setting>.json` and serve every cell type of that dataset (the data file decides the cell type); lentiMPRA and Gosai have four each, differing only in stage 2: `fullft` (full fine-tuning), `fullft_ema`, `locon` and `locon_ema` (rank-128 LoCon adapters). Their values were tuned on K562. `docs/LoCon_EMA.md` compares them and gives the commands that reproduce the comparison.
@@ -73,7 +83,7 @@ A run directory:
 ```text
 results/agarwal2025_K562_locon_ema/
 ├── config.json          # the resolved TrainConfig
-├── run.json             # construct, input length, input TSV, held-out chromosomes
+├── run.json             # construct, input length, input TSV, the holdout
 ├── history.json
 ├── stage1/best.pt
 └── stage2/
@@ -207,7 +217,7 @@ src/alphagenome_encoder_ft/
 configs/          # training hyperparameters, <dataset>_<stage-2 setting>.json
 docs/             # LoCon_EMA.md (stage-2 options), low_rank_head.md (first_layer_rank)
 scripts/
-├── agarwal2025/  # lentiMPRA: coordinates, chromosome-split reader, train, evaluate, reproduce
+├── agarwal2025/  # lentiMPRA: coordinates, chromosome/fold reader, train, evaluate, reproduce
 ├── gosai2024/    # episomal MPRA: prepare, construct, reader, train, evaluate, reproduce
 ├── dealmeida2022/  # DeepSTARR: train, evaluate
 ├── summarize_runs.py         # seed-averaged table of scored runs
