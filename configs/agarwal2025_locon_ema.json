@@ -28,7 +28,7 @@
     "first_layer_rank": 128,
     "head_type": "mpra",
     "num_outputs": 1,
-    "per_output_hidden_layers": false
+    "split_at": "output"
   },
   "optim": {
     "optimizer": "adamw",

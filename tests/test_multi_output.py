@@ -1,4 +1,4 @@
-"""Multi-output heads: per_output_hidden_layers, the masked default loss and NaN-aware metrics."""
+"""Multi-output heads: split_at, the masked default loss and NaN-aware metrics."""
 
 from __future__ import annotations
 
@@ -23,83 +23,123 @@ from conftest import DummyAlphaGenome, make_config
 L, D = 3, 1536
 
 
+@pytest.mark.parametrize("split_at", ["output", "hidden", "input"])
 @pytest.mark.parametrize("pooling_type", ["flatten", "center", "mean"])
 @pytest.mark.parametrize("first_layer_rank", [None, 4])
-def test_per_output_head_shape(pooling_type: str, first_layer_rank: int | None):
+def test_split_head_shape(split_at: str, pooling_type: str, first_layer_rank: int | None):
     head = MPRAHead(
         pooling_type=pooling_type, hidden_sizes=8, num_outputs=3,
-        first_layer_rank=first_layer_rank, per_output_hidden_layers=True,
+        first_layer_rank=first_layer_rank, split_at=split_at,
     )
     assert head(torch.randn(5, L, D)).shape == (5, 3)
-    assert len(head.branches) == 3
-    assert not hasattr(head, "output_layer")
 
 
-def test_deepstarr_head_takes_per_output_hidden_layers():
-    head = DeepSTARRHead(hidden_sizes=8, per_output_hidden_layers=True)
+@pytest.mark.parametrize("split_at", ["hidden", "input"])
+def test_single_output_split_head_keeps_scalar_output(split_at: str):
+    assert MPRAHead(hidden_sizes=8, split_at=split_at)(torch.randn(5, L, D)).shape == (5,)
+
+
+@pytest.mark.parametrize("split_at", ["hidden", "input"])
+def test_deepstarr_head_takes_split_at(split_at: str):
+    head = DeepSTARRHead(hidden_sizes=8, split_at=split_at)
     assert head(torch.randn(2, L, D)).shape == (2, 2)
-    assert len(head.branches) == 2
 
 
-def test_each_output_reaches_only_its_own_branch_and_the_shared_factor():
+def test_split_at_validation():
+    with pytest.raises(ValueError, match="split_at"):
+        MPRAHead(hidden_sizes=8, split_at="norm")
+    with pytest.raises(ValueError, match="head.split_at"):
+        HeadConfig(split_at="norm")
+
+
+def _grad_sum(module: torch.nn.Module) -> float:
+    return sum(0.0 if p.grad is None else float(p.grad.abs().sum()) for p in module.parameters())
+
+
+def test_split_at_hidden_shares_the_factor_and_nothing_after_it():
     torch.manual_seed(0)
-    head = MPRAHead(hidden_sizes=8, num_outputs=3, first_layer_rank=4, per_output_hidden_layers=True, dropout=None)
+    head = MPRAHead(hidden_sizes=8, num_outputs=3, first_layer_rank=4, split_at="hidden", dropout=None)
     head(torch.randn(4, L, D))[:, 1].sum().backward()
     assert head.first_layer_factor.weight.grad.abs().sum() > 0
-    for k, branch in enumerate(head.branches):
-        grads = [p.grad for p in branch.parameters()]
-        if k == 1:
-            assert all(g is not None and g.abs().sum() > 0 for g in grads)
-        else:
-            assert all(g is None or g.abs().sum() == 0 for g in grads)
+    assert [_grad_sum(branch) > 0 for branch in head.branches] == [False, True, False]
 
 
-def test_shared_head_keeps_state_dict_keys_and_initialisation():
-    # The option is off by default and must not change the shared head at all.
+def test_split_at_input_shares_nothing():
+    torch.manual_seed(0)
+    head = MPRAHead(hidden_sizes=8, num_outputs=3, first_layer_rank=4, split_at="input", dropout=None)
+    head(torch.randn(4, L, D))[:, 1].sum().backward()
+    assert [_grad_sum(sub) > 0 for sub in head.heads] == [False, True, False]
+    # The collecting module holds no layers of its own.
+    assert set(dict(head.named_children())) == {"heads"}
+
+
+def test_split_at_input_is_single_output_heads_side_by_side():
+    x = torch.randn(4, L, D)
+    torch.manual_seed(0)
+    head = MPRAHead(hidden_sizes=8, num_outputs=2, first_layer_rank=4, split_at="input").eval()
+    out = head(x)
+    for k, sub in enumerate(head.heads):
+        assert sub.num_outputs == 1 and sub.split_at == "output"
+        torch.testing.assert_close(out[:, k], sub(x))
+
+
+def test_default_head_keeps_state_dict_keys_and_initialisation():
+    # split_at="output" is the default and must not change the shared head at all.
     x = torch.randn(2, L, D)
     torch.manual_seed(0)
     a = MPRAHead(hidden_sizes=8, num_outputs=3, first_layer_rank=4).eval()
     out_a = a(x)  # lazy layers initialise on the first call
     torch.manual_seed(0)
-    b = MPRAHead(hidden_sizes=8, num_outputs=3, first_layer_rank=4, per_output_hidden_layers=False).eval()
+    b = MPRAHead(hidden_sizes=8, num_outputs=3, first_layer_rank=4, split_at="output").eval()
     torch.testing.assert_close(out_a, b(x))
     keys = set(a.state_dict())
     assert "output_layer.weight" in keys and "hidden_layers.0.weight" in keys
-    assert not any(key.startswith("branches") for key in keys)
+    assert not any(key.startswith(("branches", "heads")) for key in keys)
 
 
-def test_per_output_head_weight_count():
-    # shared factor (L*D*r) + K * (r*H + H + H*1 + 1)
+@pytest.mark.parametrize(
+    ("split_at", "expected"),
+    [
+        # shared: factor L*D*r + r*H + H + H*K + K
+        ("output", lambda r, h, k: L * D * r + r * h + h + h * k + k),
+        # shared factor + K * (r*H + H + H + 1)
+        ("hidden", lambda r, h, k: L * D * r + k * (r * h + h + h + 1)),
+        # K * (L*D*r + r*H + H + H + 1)
+        ("input", lambda r, h, k: k * (L * D * r + r * h + h + h + 1)),
+    ],
+)
+def test_split_head_weight_count(split_at: str, expected):
     r, h, k = 4, 8, 3
-    head = MPRAHead(hidden_sizes=h, num_outputs=k, first_layer_rank=r, per_output_hidden_layers=True, norm_type="none")
+    head = MPRAHead(hidden_sizes=h, num_outputs=k, first_layer_rank=r, split_at=split_at, norm_type="none")
     _ = head(torch.zeros(1, L, D))
-    assert sum(p.numel() for p in head.parameters()) == L * D * r + k * (r * h + h + h + 1)
+    assert sum(p.numel() for p in head.parameters()) == expected(r, h, k)
 
 
-def test_config_and_cli_carry_per_output_hidden_layers(tmp_path: Path):
-    assert HeadConfig().per_output_hidden_layers is False
+def test_config_and_cli_carry_split_at(tmp_path: Path):
+    assert HeadConfig().split_at == "output"
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(make_config(tmp_path).to_dict()))
     parser = cli.add_train_arguments(argparse.ArgumentParser())
-    config = cli.load_config(parser, parser.parse_args(["--config", str(config_path), "--per_output_hidden_layers"]))
-    assert config.head.per_output_hidden_layers is True
+    config = cli.load_config(parser, parser.parse_args(["--config", str(config_path), "--split_at", "input"]))
+    assert config.head.split_at == "input"
 
 
-def test_checkpoint_roundtrip_keeps_per_output_hidden_layers(tmp_path: Path):
+@pytest.mark.parametrize("split_at", ["hidden", "input"])
+def test_checkpoint_roundtrip_keeps_split_at(tmp_path: Path, split_at: str):
     torch.manual_seed(0)
     model = AlphaGenomeEncoderModel(
         DummyAlphaGenome(),
-        MPRAHead(hidden_sizes=8, num_outputs=2, first_layer_rank=4, per_output_hidden_layers=True),
+        MPRAHead(hidden_sizes=8, num_outputs=2, first_layer_rank=4, split_at=split_at),
         construct=Construct(prefix="A", suffix="GT", length=6),
     )
     model.initialize_head(6, device="cpu")
     model.eval()
     before = model.predict_inserts(["cc"])
-    assert head_kwargs_of(model.head)["per_output_hidden_layers"] is True
+    assert head_kwargs_of(model.head)["split_at"] == split_at
 
-    path = save_checkpoint(tmp_path / "branched.pt", model, save_mode="minimal", config=make_config(tmp_path))
+    path = save_checkpoint(tmp_path / "split.pt", model, save_mode="minimal", config=make_config(tmp_path))
     restored = AlphaGenomeEncoderModel.from_checkpoint(path, device="cpu", backbone_factory=DummyAlphaGenome)
-    assert restored.head.per_output_hidden_layers is True
+    assert restored.head.split_at == split_at
     np.testing.assert_allclose(restored.predict_inserts(["cc"]).numpy(), before.numpy(), rtol=1e-5, atol=1e-5)
 
 

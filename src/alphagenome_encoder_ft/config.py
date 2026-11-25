@@ -86,10 +86,12 @@ class HeadConfig:
     norm_type: str = "layer"
     proj_dim: int | None = None
     first_layer_rank: int | None = None
-    per_output_hidden_layers: bool = False
+    split_at: str = "output"
 
     def __post_init__(self) -> None:
         self.hidden_sizes = parse_hidden_sizes(self.hidden_sizes)
+        if self.split_at not in {"output", "hidden", "input"}:
+            raise ValueError("head.split_at must be one of output, hidden, input")
         if self.proj_dim is not None and self.proj_dim <= 0:
             raise ValueError("head.proj_dim must be > 0")
         if self.first_layer_rank is not None and self.first_layer_rank <= 0:
@@ -382,5 +384,5 @@ def head_kwargs_of(head: Any) -> dict[str, Any]:
         "norm_type": head.norm_type,
         "proj_dim": head.proj_dim,
         "first_layer_rank": head.first_layer_rank,
-        "per_output_hidden_layers": head.per_output_hidden_layers,
+        "split_at": head.split_at,
     }
