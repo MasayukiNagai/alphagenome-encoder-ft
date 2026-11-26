@@ -232,11 +232,30 @@ class LoggingConfig:
     wandb_name: str = "mpra-head-encoder"
 
 
+AMP_DTYPES = ("bf16", "fp16")
+
+
 @dataclass
 class RuntimeConfig:
+    """Device and speed settings. None changes the model; all but ``seed`` may nudge numerics.
+
+    ``use_amp`` runs forward passes under autocast in ``amp_dtype``. ``fp16`` also scales the
+    loss (``torch.amp.GradScaler``) so small gradients survive; it is the choice for GPUs
+    without bf16 (V100). ``compile`` wraps the encoder in ``torch.compile`` at the start of
+    each stage, so a stage's first steps are slow; checkpoints are unaffected.
+    ``cudnn_benchmark`` lets cuDNN pick its convolution algorithms by timing them.
+    """
+
     device: str | None = None
     use_amp: bool = False
+    amp_dtype: str = "bf16"
+    compile: bool = False
+    cudnn_benchmark: bool = False
     seed: int = 42
+
+    def __post_init__(self) -> None:
+        if self.amp_dtype not in AMP_DTYPES:
+            raise ValueError(f"runtime.amp_dtype must be one of {', '.join(AMP_DTYPES)}")
 
 
 # The flat ``stage`` section and the stage-2 overrides it held were replaced by two complete

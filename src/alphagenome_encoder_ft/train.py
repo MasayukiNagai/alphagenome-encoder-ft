@@ -49,10 +49,34 @@ from .metrics import per_track, pearsonr
 from .model import AlphaGenomeEncoderModel
 
 
-def _autocast_context(device: torch.device, use_amp: bool):
+_AUTOCAST_DTYPES = {"bf16": torch.bfloat16, "fp16": torch.float16}
+
+
+def _autocast_context(device: torch.device, use_amp: bool, amp_dtype: str = "bf16"):
     if use_amp and device.type == "cuda":
-        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        return torch.autocast(device_type="cuda", dtype=_AUTOCAST_DTYPES[amp_dtype])
     return nullcontext()
+
+
+def make_grad_scaler(device: torch.device | str, use_amp: bool, amp_dtype: str) -> torch.amp.GradScaler | None:
+    """A loss scaler for fp16 autocast on CUDA, else None (bf16 and fp32 need none)."""
+
+    if use_amp and amp_dtype == "fp16" and torch.device(device).type == "cuda":
+        return torch.amp.GradScaler("cuda")
+    return None
+
+
+def apply_runtime_settings(model: AlphaGenomeEncoderModel, config: TrainConfig) -> None:
+    """Apply ``runtime.cudnn_benchmark`` and ``runtime.compile`` (called at each stage's start).
+
+    ``nn.Module.compile`` compiles in place, so parameter names, and with them checkpoints,
+    are unchanged. Calling it again after LoCon adapters are added recompiles the encoder.
+    """
+
+    if config.runtime.cudnn_benchmark:
+        torch.backends.cudnn.benchmark = True
+    if config.runtime.compile:
+        model.encoder.compile()
 
 
 def _default_loss_fn(preds: Tensor, targets: Tensor) -> Tensor:
@@ -256,18 +280,27 @@ def train_epoch(
     metric_fns: dict[str, Callable[[Tensor, Tensor], Tensor | float]] | None = None,
     gradient_accumulation_steps: int = 1,
     use_amp: bool = True,
+    amp_dtype: str = "bf16",
+    scaler: torch.amp.GradScaler | None = None,
     train_encoder: bool = False,
     grad_clip: float | None = None,
     show_progress: bool = False,
     batch_end_callback: Callable[[int, int], bool] | None = None,
     ema: ParameterEMA | None = None,
 ) -> dict[str, float]:
-    """Train for one epoch. ``ema`` is updated after every optimizer step."""
+    """Train for one epoch. ``ema`` is updated after every optimizer step that was taken.
+
+    Under fp16 autocast the loss is scaled; pass the stage's ``scaler`` so its scale carries
+    over between epochs (one is made for this epoch if not). A step whose gradients overflow
+    is skipped, and so is the EMA update that would follow it.
+    """
 
     device = torch.device(device)
     loss_fn = loss_fn or _default_loss_fn
     if gradient_accumulation_steps <= 0:
         raise ValueError("gradient_accumulation_steps must be > 0")
+    if scaler is None:
+        scaler = make_grad_scaler(device, use_amp, amp_dtype)
 
     if train_encoder:
         model.train()
@@ -290,7 +323,7 @@ def train_epoch(
         sequences = sequences.to(device)
         targets = targets.to(device).float()
         organism_idx = torch.zeros(sequences.shape[0], dtype=torch.long, device=device)
-        autocast_ctx = _autocast_context(device, use_amp)
+        autocast_ctx = _autocast_context(device, use_amp, amp_dtype)
 
         if train_encoder:
             with autocast_ctx:
@@ -304,16 +337,28 @@ def train_epoch(
                 preds = model.predict_from_encoder(encoder_output)
                 loss = loss_fn(preds, targets)
 
-        (loss / gradient_accumulation_steps).backward()
+        scaled_loss = loss / gradient_accumulation_steps
+        if scaler is not None:
+            scaled_loss = scaler.scale(scaled_loss)
+        scaled_loss.backward()
 
         if batch_idx % gradient_accumulation_steps == 0 or batch_idx == len(train_loader):
             if grad_clip is not None:
+                if scaler is not None:
+                    scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.head.parameters(), grad_clip)
                 if train_encoder:
                     torch.nn.utils.clip_grad_norm_(model.encoder.parameters(), grad_clip)
-            optimizer.step()
+            if scaler is not None:
+                scale_before = scaler.get_scale()
+                scaler.step(optimizer)
+                scaler.update()
+                stepped = scaler.get_scale() >= scale_before  # the scale drops only on a skip
+            else:
+                optimizer.step()
+                stepped = True
             optimizer.zero_grad(set_to_none=True)
-            if ema is not None:
+            if ema is not None and stepped:
                 ema.update()
 
         batch_size = targets.shape[0]
@@ -343,6 +388,7 @@ def evaluate(
     loss_fn: Callable[[Tensor, Tensor], Tensor] | None = None,
     metric_fns: dict[str, Callable[[Tensor, Tensor], Tensor | float]] | None = None,
     use_amp: bool = True,
+    amp_dtype: str = "bf16",
 ) -> dict[str, float]:
     """Evaluate on a data loader."""
 
@@ -359,7 +405,7 @@ def evaluate(
         sequences = sequences.to(device)
         targets = targets.to(device).float()
         organism_idx = torch.zeros(sequences.shape[0], dtype=torch.long, device=device)
-        with _autocast_context(device, use_amp):
+        with _autocast_context(device, use_amp, amp_dtype):
             preds = model(sequences, organism_idx)
             loss = loss_fn(preds, targets)
 
@@ -538,8 +584,8 @@ def run_training_stage(
 ) -> dict[str, Any]:
     """Run one training stage under ``stage_config``: its epochs, early stopping and dropout.
 
-    ``config`` supplies what the stages share (gradient accumulation and clipping, AMP, the
-    checkpoint save mode). With a validation loader, a ``ReduceLROnPlateau`` scheduler steps
+    ``config`` supplies what the stages share (gradient accumulation and clipping, AMP and
+    the other runtime settings, the checkpoint save mode). With a validation loader, a ``ReduceLROnPlateau`` scheduler steps
     at every validation pass (build it with ``create_scheduler``, whose patience assumes
     this); any other scheduler steps once per epoch through ``scheduler_step``.
 
@@ -552,6 +598,9 @@ def run_training_stage(
     device = torch.device(device)
     scheduler_step = scheduler_step or _default_scheduler_step
     step_per_validation = isinstance(scheduler, ReduceLROnPlateau) and val_loader is not None
+    apply_runtime_settings(model, config)
+    use_amp, amp_dtype = config.runtime.use_amp, config.runtime.amp_dtype
+    scaler = make_grad_scaler(device, use_amp, amp_dtype)
     model.head.dropout = stage_config.dropout
     num_epochs = stage_config.num_epochs
     val_evals_per_epoch = stage_config.val_evals_per_epoch
@@ -599,7 +648,8 @@ def run_training_stage(
                     device,
                     loss_fn=loss_fn,
                     metric_fns=metric_fns,
-                    use_amp=config.runtime.use_amp,
+                    use_amp=use_amp,
+                    amp_dtype=amp_dtype,
                 )
             # ``evaluate`` switches the module to eval mode; restore the active
             # training mode before continuing with the rest of the epoch.
@@ -660,7 +710,9 @@ def run_training_stage(
             loss_fn=loss_fn,
             metric_fns=metric_fns,
             gradient_accumulation_steps=config.optim.gradient_accumulation_steps,
-            use_amp=config.runtime.use_amp,
+            use_amp=use_amp,
+            amp_dtype=amp_dtype,
+            scaler=scaler,
             train_encoder=train_encoder,
             grad_clip=config.optim.gradient_clip,
             show_progress=show_progress,

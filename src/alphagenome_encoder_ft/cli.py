@@ -25,12 +25,13 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from .config import TrainConfig, load_train_config, merge_train_config, parse_hidden_sizes
+from .config import AMP_DTYPES, TrainConfig, load_train_config, merge_train_config, parse_hidden_sizes
 from .constructs import Construct
 from .data import create_dataloader
 from .metrics import regression_metrics
 from .model import AlphaGenomeEncoderModel
 from .train import (
+    _autocast_context,
     create_scheduler,
     create_stage1_optimizer,
     create_stage2_optimizer,
@@ -128,6 +129,9 @@ _SECTION_FLAGS: dict[str, list[tuple[str, dict[str, Any]]]] = {
     "runtime": [
         ("device", {"type": str}),
         ("use_amp", {"action": argparse.BooleanOptionalAction}),
+        ("amp_dtype", {"type": str, "choices": list(AMP_DTYPES)}),
+        ("compile", {"action": argparse.BooleanOptionalAction}),
+        ("cudnn_benchmark", {"action": argparse.BooleanOptionalAction}),
         ("seed", {"type": int}),
     ],
 }
@@ -446,7 +450,9 @@ def _score_test(
     final_epoch = 0.0
     for stage_name, stage_result in _stage_results(results):
         load_checkpoint(stage_result["best_checkpoint_path"], model, map_location=device)
-        test_metrics = evaluate(model, test_loader, device, use_amp=config.runtime.use_amp)
+        test_metrics = evaluate(
+            model, test_loader, device, use_amp=config.runtime.use_amp, amp_dtype=config.runtime.amp_dtype
+        )
         test_epoch = float(stage_result.get("best_epoch", 0))
         results[f"{stage_name}_test_metrics"] = test_metrics
         print(
@@ -550,12 +556,14 @@ def collect_predictions(
     *,
     device: torch.device,
     use_amp: bool,
+    amp_dtype: str = "bf16",
     reverse_complement: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return ``(y_true, y_pred)``: ``(N,)`` for scalar heads, ``(N, K)`` otherwise.
 
     ``reverse_complement`` scores the reverse complement of every input, the same flip of the
-    whole assembled sequence that RC augmentation applies.
+    whole assembled sequence that RC augmentation applies. ``use_amp`` autocasts to
+    ``amp_dtype`` (``bf16`` or ``fp16``).
     """
 
     model.eval()
@@ -566,10 +574,7 @@ def collect_predictions(
         if reverse_complement:
             sequences = sequences.flip(1)[..., [3, 2, 1, 0]]
         organism_idx = torch.zeros(sequences.shape[0], dtype=torch.long, device=device)
-        if use_amp and device.type == "cuda":
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                preds = model(sequences, organism_idx)
-        else:
+        with _autocast_context(device, use_amp, amp_dtype):
             preds = model(sequences, organism_idx)
         targets_all.append(targets.float().cpu().numpy())
         preds_all.append(preds.detach().float().cpu().numpy())
@@ -692,6 +697,7 @@ def evaluate_checkpoint(
     num_workers = num_workers if num_workers is not None else config.data.num_workers
     pin_memory = pin_memory if pin_memory is not None else config.data.pin_memory
     use_amp = use_amp if use_amp is not None else config.runtime.use_amp
+    amp_dtype = config.runtime.amp_dtype
     resolved_device = torch.device(device or config.runtime.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"Using device: {resolved_device}")
 
@@ -704,13 +710,16 @@ def evaluate_checkpoint(
     loader = create_dataloader(
         dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory
     )
-    y_true, y_pred = collect_predictions(model, loader, device=resolved_device, use_amp=use_amp)
+    y_true, y_pred = collect_predictions(
+        model, loader, device=resolved_device, use_amp=use_amp, amp_dtype=amp_dtype
+    )
 
     columns = dict(extra_columns or {})
     forward_only = None
     if rc_average:
         _, y_pred_rc = collect_predictions(
-            model, loader, device=resolved_device, use_amp=use_amp, reverse_complement=True
+            model, loader, device=resolved_device, use_amp=use_amp, amp_dtype=amp_dtype,
+            reverse_complement=True,
         )
         forward_only = regression_metrics(y_true, y_pred)
         if y_true.ndim == 1:
